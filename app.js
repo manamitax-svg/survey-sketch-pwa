@@ -40,7 +40,7 @@ const state = {
 };
 
 /* ---------- バージョン ---------- */
-const APP_VERSION = "0.14.4"; // 共有ボタン追加（Web Share API）
+const APP_VERSION = "0.14.5"; // 共有ファイル形式を.yaml.txtに変更
 
 /* ---------- 調整可能パラメータ（合意事項①: 感度調整） ---------- */
 const VERTEX_HIT_RADIUS = 34;        // 頂点ヒット半径(px) 26→34に拡大
@@ -2468,45 +2468,35 @@ document.getElementById("exportBtn").addEventListener("click", () => {
 document.getElementById("shareBtn").addEventListener("click", async () => {
   const yaml = toYaml();
   const safeName = (state.meta.site_name || "survey_record").replace(/[^\w\-]/g, "_");
-  const fileName = `${safeName}.yaml`;
-
-  // デバッグ: 共有API対応状況をトーストで確認
-  const hasShare = !!navigator.share;
-  const hasCanShare = !!navigator.canShare;
-  showToast(`share:${hasShare} canShare:${hasCanShare}`);
-  await new Promise(r => setTimeout(r, 2000));
+  // .yaml は Android の共有先アプリに認識されにくいため .txt で共有
+  // （内容はYAML形式のまま。Google Drive等で受け取り後に .yaml にリネーム可能）
+  const fileName = `${safeName}.yaml.txt`;
 
   if (navigator.share && navigator.canShare) {
-    const file = new File([yaml], fileName, { type: "text/yaml" });
-    const canShareFile = navigator.canShare({ files: [file] });
-    showToast(`canShareFile:${canShareFile}`);
-    await new Promise(r => setTimeout(r, 2000));
-
-    if (canShareFile) {
+    const file = new File([yaml], fileName, { type: "text/plain" });
+    if (navigator.canShare({ files: [file] })) {
       try {
         await navigator.share({ title: fileName, files: [file] });
         return;
       } catch (e) {
         if (e.name === "AbortError") return;
-        showToast(`fileShare error: ${e.name}`);
       }
     }
   }
 
-  // テキストとして共有を試みる
+  // テキストとして共有
   if (navigator.share) {
     try {
       await navigator.share({ title: fileName, text: yaml });
       return;
     } catch (e) {
       if (e.name === "AbortError") return;
-      showToast(`textShare error: ${e.name}`);
     }
   }
 
   // フォールバック: ダウンロード
   showToast("共有非対応のブラウザです。ダウンロードします。");
-  const blob = new Blob([yaml], { type: "text/yaml" });
+  const blob = new Blob([yaml], { type: "text/plain" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url; a.download = fileName;
