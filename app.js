@@ -2470,33 +2470,41 @@ document.getElementById("shareBtn").addEventListener("click", async () => {
   const safeName = (state.meta.site_name || "survey_record").replace(/[^\w\-]/g, "_");
   const fileName = `${safeName}.yaml`;
 
-  // Web Share API（ファイル共有）対応確認
+  // デバッグ: 共有API対応状況をトーストで確認
+  const hasShare = !!navigator.share;
+  const hasCanShare = !!navigator.canShare;
+  showToast(`share:${hasShare} canShare:${hasCanShare}`);
+  await new Promise(r => setTimeout(r, 2000));
+
   if (navigator.share && navigator.canShare) {
     const file = new File([yaml], fileName, { type: "text/yaml" });
-    if (navigator.canShare({ files: [file] })) {
+    const canShareFile = navigator.canShare({ files: [file] });
+    showToast(`canShareFile:${canShareFile}`);
+    await new Promise(r => setTimeout(r, 2000));
+
+    if (canShareFile) {
       try {
-        await navigator.share({
-          title: fileName,
-          files: [file],
-        });
+        await navigator.share({ title: fileName, files: [file] });
         return;
       } catch (e) {
-        if (e.name === "AbortError") return; // ユーザーがキャンセル
+        if (e.name === "AbortError") return;
+        showToast(`fileShare error: ${e.name}`);
       }
     }
   }
 
-  // ファイル共有非対応の場合はテキストとして共有を試みる
+  // テキストとして共有を試みる
   if (navigator.share) {
     try {
       await navigator.share({ title: fileName, text: yaml });
       return;
     } catch (e) {
       if (e.name === "AbortError") return;
+      showToast(`textShare error: ${e.name}`);
     }
   }
 
-  // 共有API非対応の場合はダウンロードにフォールバック
+  // フォールバック: ダウンロード
   showToast("共有非対応のブラウザです。ダウンロードします。");
   const blob = new Blob([yaml], { type: "text/yaml" });
   const url = URL.createObjectURL(blob);
