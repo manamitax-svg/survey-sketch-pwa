@@ -1,7 +1,7 @@
 /* 現場実測スケッチ PWA — Service Worker v4
    キャッシュバージョンを上げることで古いキャッシュを強制破棄する */
 
-const CACHE_NAME = "survey-sketch-cache-v4";
+const CACHE_NAME = "survey-sketch-cache-v5";
 const ASSETS = [
   "./index.html",
   "./app.js",

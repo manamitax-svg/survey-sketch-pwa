@@ -40,7 +40,7 @@ const state = {
 };
 
 /* ---------- バージョン ---------- */
-const APP_VERSION = "0.14.3"; // scale_confirmed・rt60_s追加
+const APP_VERSION = "0.14.4"; // 共有ボタン追加（Web Share API）
 
 /* ---------- 調整可能パラメータ（合意事項①: 感度調整） ---------- */
 const VERTEX_HIT_RADIUS = 34;        // 頂点ヒット半径(px) 26→34に拡大
@@ -2463,6 +2463,48 @@ function toYaml() {
 document.getElementById("exportBtn").addEventListener("click", () => {
   document.getElementById("outputPre").textContent = toYaml();
   document.getElementById("output-modal").classList.add("visible");
+});
+
+document.getElementById("shareBtn").addEventListener("click", async () => {
+  const yaml = toYaml();
+  const safeName = (state.meta.site_name || "survey_record").replace(/[^\w\-]/g, "_");
+  const fileName = `${safeName}.yaml`;
+
+  // Web Share API（ファイル共有）対応確認
+  if (navigator.share && navigator.canShare) {
+    const file = new File([yaml], fileName, { type: "text/yaml" });
+    if (navigator.canShare({ files: [file] })) {
+      try {
+        await navigator.share({
+          title: fileName,
+          files: [file],
+        });
+        return;
+      } catch (e) {
+        if (e.name === "AbortError") return; // ユーザーがキャンセル
+      }
+    }
+  }
+
+  // ファイル共有非対応の場合はテキストとして共有を試みる
+  if (navigator.share) {
+    try {
+      await navigator.share({ title: fileName, text: yaml });
+      return;
+    } catch (e) {
+      if (e.name === "AbortError") return;
+    }
+  }
+
+  // 共有API非対応の場合はダウンロードにフォールバック
+  showToast("共有非対応のブラウザです。ダウンロードします。");
+  const blob = new Blob([yaml], { type: "text/yaml" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = fileName;
+  document.body.appendChild(a); a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 });
 document.getElementById("closeOutputBtn").addEventListener("click", () => {
   document.getElementById("output-modal").classList.remove("visible");
