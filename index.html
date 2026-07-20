@@ -1,0 +1,496 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>現場実測スケッチ</title>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#0F1115">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<style>
+  :root {
+    --color-bg: #0F1115;
+    --color-surface: #1A1D24;
+    --color-surface-2: #23272F;
+    --color-surface-3: #2C313B;
+    --color-border: #343943;
+    --color-text: #E8EAED;
+    --color-text-dim: #9AA0A8;
+    --color-accent: #4F8CFF;
+    --color-measured: #34D399;
+    --color-unmeasured: #F87171;
+    --color-invalidated: #F59E0B;
+    --color-vertex: #FBBF24;
+    --color-vertex-selected: #4F8CFF;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: var(--color-bg); color: var(--color-text);
+    font-family: -apple-system, 'Segoe UI', 'Noto Sans JP', sans-serif;
+    overflow: hidden; touch-action: none;
+  }
+  #app { display: flex; flex-direction: column; height: 100vh; height: 100dvh; }
+
+  header {
+    padding: 8px 12px;
+    background: var(--color-surface);
+    border-bottom: 1px solid var(--color-border);
+    display: flex; align-items: center; justify-content: space-between;
+    flex-shrink: 0;
+  }
+  header h1 { font-size: 0.88rem; font-weight: 700; margin: 0; letter-spacing: 0.01em; }
+  .header-right { display: flex; align-items: center; gap: 8px; }
+  .icon-btn {
+    width: 30px; height: 30px; border-radius: 7px; border: 1px solid var(--color-border);
+    background: var(--color-surface-2); color: var(--color-text-dim);
+    display: flex; align-items: center; justify-content: center; font-size: 0.85rem;
+  }
+  .mode-badge {
+    font-size: 0.64rem; font-weight: 700; padding: 3px 9px;
+    border-radius: 999px; letter-spacing: 0.04em;
+  }
+  .mode-draw    { background: #2A3550; color: #8FB3FF; }
+  .mode-edit    { background: #3A2F1A; color: #F5C463; }
+  .mode-measure { background: #1F3A2E; color: #6EE7B7; }
+  .mode-height  { background: #38233F; color: #DDA0DD; }
+  .mode-source  { background: #1A2E3B; color: #67E8F9; }
+
+  .toolbar {
+    display: flex; gap: 6px; padding: 6px 8px;
+    background: var(--color-surface); border-bottom: 1px solid var(--color-border);
+    flex-shrink: 0; overflow-x: auto;
+  }
+  .tool-btn {
+    flex: 0 0 auto;
+    padding: 7px 12px; font-size: 0.74rem; font-weight: 600;
+    background: var(--color-surface-2); color: var(--color-text-dim);
+    border: 1px solid var(--color-border); border-radius: 8px;
+    white-space: nowrap;
+  }
+  .tool-btn.active { background: var(--color-accent); color: white; border-color: var(--color-accent); }
+  .tool-btn:active { opacity: 0.7; }
+
+  #canvas-wrap { position: relative; flex: 1; overflow: hidden; background: #14161B; min-height: 0; }
+  #sketchCanvas { display: block; width: 100%; height: 100%; touch-action: none; }
+
+  .legend {
+    position: absolute; top: 8px; right: 8px;
+    background: rgba(26,29,36,0.92); border: 1px solid var(--color-border);
+    border-radius: 8px; padding: 7px 9px; font-size: 0.62rem;
+    display: flex; flex-direction: column; gap: 4px; pointer-events: none;
+  }
+  .legend-item { display: flex; align-items: center; gap: 6px; }
+  .legend-dot { width: 9px; height: 9px; border-radius: 50%; }
+  .legend-line { width: 16px; height: 3px; border-radius: 2px; }
+
+  .scale-badge {
+    position: absolute; top: 8px; left: 8px;
+    background: rgba(26,29,36,0.92); border: 1px solid var(--color-border);
+    border-radius: 8px; padding: 6px 10px; font-size: 0.68rem;
+    color: var(--color-text-dim); pointer-events: none;
+    display: none;
+  }
+  .scale-badge.visible { display: block; }
+  .scale-badge b { color: var(--color-accent); }
+
+  #bottom-panel {
+    background: var(--color-surface); border-top: 1px solid var(--color-border);
+    flex-shrink: 0; max-height: 42vh; overflow-y: auto;
+  }
+
+  .panel-section { padding: 9px 12px; border-bottom: 1px solid var(--color-border); }
+  .panel-title {
+    font-size: 0.64rem; font-weight: 700; letter-spacing: 0.07em;
+    text-transform: uppercase; color: var(--color-text-dim); margin-bottom: 6px;
+  }
+
+  .stat-row { display: flex; gap: 8px; flex-wrap: wrap; }
+  .stat-chip {
+    background: var(--color-surface-2); border: 1px solid var(--color-border);
+    border-radius: 6px; padding: 5px 9px; font-size: 0.7rem;
+  }
+  .stat-chip b { color: var(--color-text); }
+  .stat-chip.warn { border-color: var(--color-invalidated); }
+  .stat-chip.warn b { color: var(--color-invalidated); }
+
+  .anomaly-chip {
+    border-color: #EF4444; background: #2A1A1A; cursor: pointer;
+    animation: pulse-border 1.5s ease-in-out infinite;
+  }
+  .anomaly-chip b { color: #FCA5A5; }
+  .anomaly-chip:active { opacity: 0.7; }
+  @keyframes pulse-border {
+    0%, 100% { border-color: #EF4444; }
+    50% { border-color: #FCA5A5; }
+  }
+
+  #anomalyWarnings { display: none; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+
+  .reset-view-btn {
+    position: absolute; bottom: 8px; right: 8px;
+    background: rgba(26,29,36,0.92); border: 1px solid var(--color-border);
+    border-radius: 8px; padding: 6px 10px; font-size: 0.7rem;
+    color: var(--color-text-dim); cursor: pointer;
+  }
+  .reset-view-btn:active { opacity: 0.7; }
+
+  .rect-side-btn {
+    padding: 7px 14px; font-size: 0.78rem; font-weight: 700;
+    background: var(--color-surface-2); color: var(--color-text-dim);
+    border: 1px solid var(--color-border); border-radius: 8px; cursor: pointer;
+  }
+  .rect-side-btn.selected {
+    background: #3A3010; color: #FBBF24; border-color: #FBBF24;
+  }
+  .rect-side-btn:active { opacity: 0.7; }
+
+  /* --- フォーム共通 --- */
+  .form-block { display: none; padding: 10px 12px; }
+  .form-block.visible { display: block; }
+  .form-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .form-row label { font-size: 0.76rem; color: var(--color-text-dim); width: 64px; flex-shrink: 0; }
+  .form-row input, .form-row select {
+    flex: 1; padding: 8px 10px; font-size: 0.95rem;
+    background: var(--color-surface-2); border: 1px solid var(--color-border);
+    border-radius: 6px; color: var(--color-text);
+  }
+  .form-actions { display: flex; gap: 8px; margin-top: 6px; }
+  .form-actions button {
+    flex: 1; padding: 9px; font-size: 0.78rem; font-weight: 700;
+    border-radius: 7px; border: none;
+  }
+  .btn-confirm { background: var(--color-measured); color: #06281A; }
+  .btn-cancel { background: var(--color-surface-2); color: var(--color-text-dim); border: 1px solid var(--color-border) !important; }
+  .btn-restore { background: var(--color-invalidated); color: #2B1B02; }
+
+  .prev-value-box {
+    background: var(--color-surface-3); border: 1px dashed var(--color-invalidated);
+    border-radius: 7px; padding: 8px 10px; margin-bottom: 8px; font-size: 0.74rem;
+  }
+  .prev-value-box b { color: var(--color-invalidated); font-size: 0.95rem; }
+
+  .hint {
+    padding: 7px 12px; font-size: 0.7rem; color: var(--color-text-dim);
+    background: var(--color-surface-2);
+  }
+
+  footer {
+    display: flex; gap: 8px; padding: 8px 10px;
+    background: var(--color-surface); border-top: 1px solid var(--color-border);
+    flex-shrink: 0; padding-bottom: max(8px, env(safe-area-inset-bottom));
+  }
+  footer button {
+    flex: 1; padding: 11px; font-size: 0.8rem; font-weight: 700;
+    border-radius: 8px; border: 1px solid var(--color-border);
+    background: var(--color-surface-2); color: var(--color-text);
+  }
+  footer button.primary { background: var(--color-accent); border-color: var(--color-accent); color: white; }
+  footer button:active { opacity: 0.7; }
+
+  /* --- モーダル共通 --- */
+  .modal-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.7);
+    display: none; align-items: center; justify-content: center; z-index: 50;
+    padding: 16px;
+  }
+  .modal-overlay.visible { display: flex; }
+  .modal-box {
+    background: var(--color-surface); border: 1px solid var(--color-border);
+    border-radius: 12px; padding: 16px; width: 100%; max-width: 480px;
+    max-height: 85vh; display: flex; flex-direction: column;
+  }
+  .modal-box h2 { font-size: 0.92rem; margin: 0 0 10px 0; }
+  .modal-box pre {
+    background: #0B0D11; border: 1px solid var(--color-border);
+    border-radius: 8px; padding: 10px; font-size: 0.65rem; line-height: 1.5;
+    overflow: auto; flex: 1; color: #9CDCFE; white-space: pre-wrap; word-break: break-all;
+  }
+  .modal-box .actions { display: flex; gap: 8px; margin-top: 10px; }
+  .modal-box button {
+    flex: 1; padding: 10px; font-size: 0.78rem; font-weight: 700;
+    border-radius: 7px; border: none; background: var(--color-accent); color: white;
+  }
+  .modal-box button.secondary { background: var(--color-surface-2); color: var(--color-text-dim); border: 1px solid var(--color-border); }
+
+  /* --- 高さ一覧 --- */
+  .bulk-height-row {
+    display: flex; gap: 8px; margin-bottom: 12px;
+    padding: 9px; background: var(--color-surface-3);
+    border: 1px solid var(--color-accent); border-radius: 8px;
+  }
+  .bulk-height-row input {
+    flex: 1; padding: 8px 10px; font-size: 0.9rem;
+    background: var(--color-surface-2); border: 1px solid var(--color-border);
+    border-radius: 6px; color: var(--color-text);
+  }
+  .bulk-height-row button {
+    padding: 8px 14px; font-size: 0.76rem; font-weight: 700;
+    background: var(--color-accent); color: white;
+    border: none; border-radius: 6px; white-space: nowrap;
+  }
+  .bulk-height-row button:active { opacity: 0.7; }
+
+  .height-list { display: flex; flex-direction: column; gap: 6px; }
+  .height-row {
+    display: flex; align-items: center; gap: 8px;
+    background: var(--color-surface-2); border: 1px solid var(--color-border);
+    border-radius: 7px; padding: 7px 9px;
+  }
+  .height-row .vid { font-size: 0.78rem; font-weight: 700; width: 36px; }
+  .height-row input {
+    flex: 1; padding: 6px 8px; font-size: 0.85rem;
+    background: var(--color-surface-3); border: 1px solid var(--color-border);
+    border-radius: 5px; color: var(--color-text);
+  }
+  .height-row .h-status { font-size: 0.62rem; padding: 2px 7px; border-radius: 999px; flex-shrink: 0; }
+  .h-status.measured { background: #16332A; color: var(--color-measured); }
+  .h-status.unmeasured { background: #3A1F1F; color: var(--color-unmeasured); }
+
+  /* --- メタ情報フォーム --- */
+  .meta-form .form-row label { width: 84px; }
+
+  /* --- コンテキストメニュー --- */
+  .ctx-item {
+    display:flex; align-items:center; gap:10px;
+    padding:11px 14px; font-size:0.82rem; font-weight:600;
+    color:var(--color-text); cursor:pointer; border:none;
+    background:none; width:100%; text-align:left;
+  }
+  .ctx-item:active { background:var(--color-surface-2); }
+  .ctx-item.danger { color:#F87171; }
+  .ctx-item + .ctx-item { border-top:1px solid var(--color-border); }
+
+  /* --- 音源一覧 --- */
+  .source-row {
+    background: var(--color-surface-2); border: 1px solid var(--color-border);
+    border-radius: 8px; padding: 8px 10px; margin-bottom: 6px;
+  }
+  .source-row.selected { border-color: #67E8F9; background: rgba(103,232,249,0.08); }
+  .source-row-header {
+    display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px;
+  }
+  .source-name { font-size: 0.82rem; font-weight: 700; color: #67E8F9; }
+  .source-del-btn {
+    font-size: 0.7rem; padding: 2px 8px; border-radius: 5px; border: 1px solid #F87171;
+    background: rgba(248,113,113,0.12); color: #F87171; cursor: pointer;
+  }
+  .source-coords {
+    display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; margin-bottom: 6px;
+  }
+  .source-coord-item { display: flex; flex-direction: column; gap: 2px; }
+  .source-coord-item label { font-size: 0.62rem; color: var(--color-text-dim); }
+  .source-coord-item input {
+    width: 100%; padding: 5px 6px; font-size: 0.82rem;
+    background: var(--color-surface-3); border: 1px solid var(--color-border);
+    border-radius: 5px; color: var(--color-text);
+  }
+  .source-nudge-row { display: flex; gap: 4px; flex-wrap: wrap; }
+  .nudge-btn {
+    padding: 5px 8px; font-size: 0.72rem; font-weight: 700;
+    background: var(--color-surface-3); border: 1px solid var(--color-border);
+    border-radius: 5px; color: var(--color-text-dim); cursor: pointer; flex: 1;
+  }
+  .nudge-btn:active { background: var(--color-accent); color: white; }
+
+  /* --- トースト --- */
+  #toast {
+    position: fixed; bottom: 80px; left: 50%; transform: translateX(-50%);
+    background: #1A1D24; border: 1px solid var(--color-border);
+    color: var(--color-text); padding: 9px 18px; border-radius: 999px;
+    font-size: 0.76rem; z-index: 60; opacity: 0; pointer-events: none;
+    transition: opacity 0.25s ease;
+  }
+  #toast.visible { opacity: 1; }
+</style>
+</head>
+<body>
+<div id="app">
+
+  <header>
+    <h1 id="appTitle">🏗 現場実測スケッチ</h1>
+    <div class="header-right">
+      <span id="versionBadge" style="font-size:0.6rem;color:var(--color-text-dim);letter-spacing:0.03em;"></span>
+      <span id="modeBadge" class="mode-badge mode-draw">DRAW</span>
+      <button class="icon-btn" id="metaBtn" title="現場情報">ℹ️</button>
+    </div>
+  </header>
+
+  <div class="toolbar">
+    <button class="tool-btn active" data-tool="draw">✏️ 描画</button>
+    <button class="tool-btn" data-tool="edit">✥ 編集</button>
+    <button class="tool-btn" data-tool="measure">📏 測距</button>
+    <button class="tool-btn" data-tool="diagonal">⤢ 対角線</button>
+    <button class="tool-btn" data-tool="height">📐 高さ</button>
+    <button class="tool-btn" data-tool="source">🔊 音源</button>
+    <button class="tool-btn" id="undoBtn">↩ 元に戻す</button>
+    <button class="tool-btn" id="clearBtn">🗑 全消去</button>
+  </div>
+
+  <div id="canvas-wrap">
+    <canvas id="sketchCanvas"></canvas>
+    <div class="scale-badge" id="scaleBadge">換算スケール: <b id="scaleValue">未設定</b></div>
+    <button class="reset-view-btn" id="resetViewBtn" title="ビューをリセット">⊡ リセット</button>
+    <div class="legend">
+      <div class="legend-item"><span class="legend-line" style="background:var(--color-measured)"></span>測定済</div>
+      <div class="legend-item"><span class="legend-line" style="background:var(--color-unmeasured)"></span>未測定</div>
+      <div class="legend-item"><span class="legend-line" style="background:var(--color-invalidated)"></span>要再確認</div>
+      <div class="legend-item"><span class="legend-dot" style="background:var(--color-vertex)"></span>頂点</div>
+      <div class="legend-item"><span style="font-size:0.7rem">🔒</span>辺長拘束</div>
+      <div class="legend-item"><span style="font-size:0.7rem;color:#fff;font-weight:700">└</span>角度拘束</div>
+    </div>
+  </div>
+
+  <div id="bottom-panel">
+    <div class="panel-section">
+      <div class="panel-title">状態</div>
+      <div class="stat-row">
+        <div class="stat-chip">頂点 <b id="statVerts">0</b></div>
+        <div class="stat-chip">辺 <b id="statEdges">0</b></div>
+        <div class="stat-chip">測定済 <b id="statMeasured">0</b></div>
+        <div class="stat-chip warn">要再確認 <b id="statInvalidated">0</b></div>
+        <div class="stat-chip">未測定 <b id="statUnmeasured">0</b></div>
+      </div>
+      <div id="anomalyWarnings"></div>
+    </div>
+
+    <!-- 長方形スケール校正UI -->
+    <div class="form-block" id="rectScalePanel">
+      <div class="panel-title">📐 初期スケール校正 — 長さがわかる辺を選んで入力</div>
+      <div class="prev-value-box" style="margin-bottom:8px;">
+        手書きを長方形に変換しました。実測値がわかる辺を選び、長さを入力してください。
+      </div>
+      <div id="rectSideBtns" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;"></div>
+      <div class="form-row">
+        <label>長さ [m]</label>
+        <input type="number" id="rectLengthInput" inputmode="decimal" step="0.001" placeholder="例: 8.450">
+      </div>
+      <div class="form-actions">
+        <button class="btn-confirm" id="confirmRectScale">確定</button>
+        <button class="btn-cancel" id="skipRectScale">スキップ</button>
+      </div>
+    </div>
+
+    <!-- 測距入力フォーム -->
+    <div class="form-block" id="measure-form">
+      <div class="panel-title" id="measureFormTitle">辺の実測値を入力</div>
+      <div id="prevValueBox" class="prev-value-box" style="display:none;">
+        編集前の実測値: <b id="prevValueText"></b><br>
+        形状編集により要再確認になっています。問題なければそのまま確定できます。
+      </div>
+      <div class="form-row">
+        <label>距離 [m]</label>
+        <input type="number" id="lengthInput" inputmode="decimal" step="0.001" placeholder="例: 5.023">
+      </div>
+      <div class="form-actions">
+        <button class="btn-restore" id="restorePrev" style="display:none;">前回値で確定</button>
+      </div>
+      <div class="form-actions">
+        <button class="btn-confirm" id="confirmMeasure">確定</button>
+        <button class="btn-cancel" id="cancelMeasure">キャンセル</button>
+      </div>
+    </div>
+
+    <!-- 高さ入力リスト -->
+    <div class="form-block" id="height-form">
+      <div class="panel-title">頂点ごとの高さ [m]</div>
+      <div class="bulk-height-row">
+        <input type="number" id="bulkHeightInput" inputmode="decimal" step="0.01" placeholder="天井高 [m]（例: 2.700）">
+        <button id="applyBulkHeight">全頂点に適用</button>
+      </div>
+      <div class="height-list" id="heightList"></div>
+    </div>
+
+    <!-- 音源一覧・編集パネル（音源モード時に表示） -->
+    <div class="form-block" id="source-list-panel">
+      <div class="panel-title" style="display:flex;justify-content:space-between;align-items:center;">
+        <span>🔊 音源一覧</span>
+        <button class="btn-confirm" id="addSourceBtn" style="padding:4px 10px;font-size:0.72rem;">＋ 追加</button>
+      </div>
+      <div id="sourceList"></div>
+      <div class="hint" style="margin-top:4px;padding:4px 0;font-size:0.68rem;">長押しで音源を配置。ドラッグで移動できます。</div>
+    </div>
+
+    <div class="hint" id="hintText">指でなぞって平面の概形を描いてください。ペンアップで自動的に直線化されます。</div>
+  </div>
+
+  <footer>
+    <button id="exportBtn">📤 YAML出力</button>
+    <button class="primary" id="doneBtn">✅ 保存して完了</button>
+  </footer>
+
+</div>
+
+<!-- メタ情報モーダル -->
+<div class="modal-overlay" id="meta-modal">
+  <div class="modal-box">
+    <h2>現場情報</h2>
+    <div class="meta-form">
+      <div class="form-row"><label>現場名</label><input type="text" id="metaSiteName" placeholder="例: Hall_A"></div>
+      <div class="form-row"><label>測定者</label><input type="text" id="metaSurveyor" placeholder="例: T"></div>
+      <div class="form-row"><label>測定日</label><input type="date" id="metaDate"></div>
+      <div class="form-row"><label>RT60 [秒]</label><input type="number" id="metaRt60" inputmode="decimal" step="0.01" placeholder="例: 1.2（未測定時は空欄）"></div>
+      <div class="form-row"><label>メモ</label><input type="text" id="metaNotes" placeholder="任意"></div>
+    </div>
+    <div class="actions">
+      <button id="saveMetaBtn">保存</button>
+      <button class="secondary" id="closeMetaBtn">閉じる</button>
+    </div>
+  </div>
+</div>
+
+<!-- 出力モーダル -->
+<div class="modal-overlay" id="output-modal">
+  <div class="modal-box">
+    <h2>出力データ（survey_record.yaml）</h2>
+    <pre id="outputPre"></pre>
+    <div class="actions">
+      <button id="downloadOutputBtn">💾 ファイル保存</button>
+      <button id="copyOutputBtn">📋 コピー</button>
+      <button class="secondary" id="closeOutputBtn">閉じる</button>
+    </div>
+  </div>
+</div>
+
+<!-- 長押しコンテキストメニュー -->
+<div id="ctx-menu" style="
+  display:none; position:fixed; z-index:70;
+  background:var(--color-surface); border:1px solid var(--color-border);
+  border-radius:10px; overflow:hidden; min-width:172px;
+  box-shadow:0 8px 24px rgba(0,0,0,0.5);
+">
+  <div id="ctx-menu-title" style="
+    padding:8px 14px; font-size:0.7rem; font-weight:700;
+    color:var(--color-text-dim); border-bottom:1px solid var(--color-border);
+    letter-spacing:0.05em;
+  "></div>
+  <div id="ctx-menu-items"></div>
+</div>
+
+<!-- 音源追加・編集モーダル -->
+<div class="modal-overlay" id="source-modal">
+  <div class="modal-box">
+    <h2 id="sourceModalTitle">音源を追加</h2>
+    <div class="form-row"><label>名前</label><input type="text" id="sourceNameInput" placeholder="例: speaker_L"></div>
+    <div class="form-row"><label>Z高さ [m]</label><input type="number" id="sourceZInput" inputmode="decimal" step="0.01" placeholder="例: 1.5"></div>
+    <div class="form-row"><label>半径 [m]</label><input type="number" id="sourceRadiusInput" inputmode="decimal" step="0.001" value="0.13"></div>
+    <div class="form-row">
+      <label>flux_real</label>
+      <select id="sourceFluxInput">
+        <option value="1.0">1.0（同位相）</option>
+        <option value="-1.0">-1.0（逆位相）</option>
+      </select>
+    </div>
+    <div class="actions">
+      <button id="confirmSource">確定</button>
+      <button class="secondary" id="cancelSource">キャンセル</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script src="app.js"></script>
+</body>
+</html>
