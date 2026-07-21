@@ -40,7 +40,7 @@ const state = {
 };
 
 /* ---------- バージョン ---------- */
-const APP_VERSION = "0.15.3"; // 拘束辺の寸法表示を測定値固定・recomputeLayout頂点固定
+const APP_VERSION = "0.15.4"; // 要確認(invalidated)辺の寸法表示をドラッグ中リアルタイム再計算に修正
 
 /* ---------- 調整可能パラメータ（合意事項①: 感度調整） ---------- */
 const VERTEX_HIT_RADIUS = 34;        // 頂点ヒット半径(px) 26→34に拡大
@@ -747,7 +747,13 @@ function drawEdgeLabel(item, v1, v2) {
     if (item.autoConstrained) label += " 🔒(自動)";
     else if (item.constrained) label += " 🔒";
   } else if (m.status === "invalidated") {
-    label = `要確認(${m.previous_length_m != null ? m.previous_length_m.toFixed(2) : "?"}m)`;
+    if (state.scalePxPerMeter) {
+      // 拘束解除後もドラッグ操作に追従させる（現在のpx距離から換算してリアルタイム表示）
+      const currentM = currentPx / state.scalePxPerMeter;
+      label = `要確認(${currentM.toFixed(2)}m)`;
+    } else {
+      label = `要確認(${m.previous_length_m != null ? m.previous_length_m.toFixed(2) : "?"}m)`;
+    }
   } else if (m.estimated_length_m != null) {
     // 未測定でスケールあり: 現在のpx距離からリアルタイム概算表示
     if (state.scalePxPerMeter) {
