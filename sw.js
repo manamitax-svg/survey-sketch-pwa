@@ -1,13 +1,13 @@
-/* 現場実測スケッチ PWA — Service Worker v4
-   キャッシュバージョンを上げることで古いキャッシュを強制破棄する */
-
-const CACHE_NAME = "survey-sketch-cache-v7";
+const CACHE_NAME = "survey-sketch-cache-v8";
 const ASSETS = [
   "./index.html",
   "./app.js",
   "./manifest.json",
   "./icon-192.png",
   "./icon-512.png",
+  "./planegcs_modules.js",
+  "./planegcs.js",
+  "./planegcs.wasm",
 ];
 
 self.addEventListener("install", (event) => {

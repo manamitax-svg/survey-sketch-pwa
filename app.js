@@ -40,7 +40,7 @@ const state = {
 };
 
 /* ---------- バージョン ---------- */
-const APP_VERSION = "0.14.5"; // 共有ファイル形式を.yaml.txtに変更
+const APP_VERSION = "0.15.0"; // planegcs ソルバー導入
 
 /* ---------- 調整可能パラメータ（合意事項①: 感度調整） ---------- */
 const VERTEX_HIT_RADIUS = 34;        // 頂点ヒット半径(px) 26→34に拡大
@@ -1161,20 +1161,27 @@ function jumpToSketchPos(sx, sy) {
   render();
 }
 
+
 /* ============================================================
-   統一拘束ソルバー（辺長ベース・優先度付きBFS）
-   V0参照をやめ、辺の measurement.length_m または現在px距離を使用。
-   ドラッグ・測距確定・角度変更後の形状再計算を同一関数で処理。
+   統一拘束ソルバー（planegcs ベース + BFSフォールバック）
    ============================================================ */
 
-let _dragInitialPositions = []; // 後方互換のため宣言のみ残す（使用しない）
+let _gcsReady = false;
 
-function saveDragInitial() {} // 呼び出し元との互換のため空関数
+async function initPlanegcs() {
+  if (typeof PlanegcsLib === 'undefined') {
+    console.warn('[solver] PlanegcsLib not found, using BFS fallback');
+    return;
+  }
+  try {
+    await PlanegcsLib.init();
+    _gcsReady = true;
+    console.log('[solver] planegcs ready');
+  } catch (e) {
+    console.warn('[solver] planegcs init failed, using BFS fallback:', e);
+  }
+}
 
-/**
- * 辺のソルバー用方向を返す
- * "H" = horizontal, "V" = vertical, null = 方向拘束なし
- */
 function edgeSolverDir(e) {
   if (!e.direction) return null;
   if (e.direction.type === "horizontal") return "H";
@@ -1182,11 +1189,6 @@ function edgeSolverDir(e) {
   return null;
 }
 
-/**
- * 辺のpx長さを返す
- * 測定済み + スケールあり → measurement.length_m から変換
- * それ以外 → 現在の頂点座標から計算
- */
 function edgeLenPx(e) {
   if (e.measurement.status === "measured" && e.measurement.length_m != null && state.scalePxPerMeter) {
     return e.measurement.length_m * state.scalePxPerMeter;
@@ -1197,11 +1199,6 @@ function edgeLenPx(e) {
   return Math.hypot(vb.x - va.x, vb.y - va.y);
 }
 
-/**
- * 辺の符号（from→to方向）を現在の頂点座標から返す
- * H辺: toのxがfromより大きければ+1、小さければ-1
- * V辺: toのyがfromより大きければ+1、小さければ-1
- */
 function edgeSign(e, dir) {
   const va = state.vertices.find(v => v.id === e.from);
   const vb = state.vertices.find(v => v.id === e.to);
@@ -1210,244 +1207,130 @@ function edgeSign(e, dir) {
   return vb.y >= va.y ? 1 : -1;
 }
 
-/**
- * 統一拘束ソルバー（優先度付きBFS）
- *
- * dragVid: 確定頂点のid（ドラッグ頂点 or 測距確定後の任意頂点）
- * tx, ty:  その頂点の確定座標
- *
- * H辺に接続する隣接頂点ni:
- *   ny = y（H辺なのでyを揃える、必須）
- *   nx:
- *     constrained=true → x ± edgeLenPx（辺長固定）
- *     constrained=false → ni.x のまま（辺長変化）
- *
- * V辺に接続する隣接頂点ni:
- *   nx = x（V辺なのでxを揃える、必須）
- *   ny:
- *     constrained=true → y ± edgeLenPx（辺長固定）
- *     constrained=false → ni.y のまま
- *
- * 符号（±）は辺のfrom→to方向から決定。
- * viがfrom側ならsign、to側なら-sign。
- */
+function buildPrimitives(dragVid, tx, ty) {
+  const primitives = [];
+  let id = 1;
+  const pidMap = {};
+  const originId = state.coordinateSystem && state.coordinateSystem.originId;
+  for (const v of state.vertices) {
+    const pid = String(id++);
+    pidMap[v.id] = pid;
+    primitives.push({ id: pid, type: 'point', x: v.x, y: v.y, fixed: v.id === originId });
+  }
+  for (const e of state.edges) {
+    const dir = edgeSolverDir(e);
+    if (!dir) continue;
+    const p1id = pidMap[e.from], p2id = pidMap[e.to];
+    if (!p1id || !p2id) continue;
+    const lid = String(id++);
+    primitives.push({ id: lid, type: 'line', p1_id: p1id, p2_id: p2id });
+    primitives.push({ id: String(id++), type: dir === 'H' ? 'horizontal_l' : 'vertical_l', l_id: lid });
+    if (e.constrained) {
+      const lenPx = edgeLenPx(e);
+      if (lenPx > 0) {
+        primitives.push({ id: String(id++), type: 'p2p_distance',
+          p1_id: p1id, p2_id: p2id, distance: lenPx });
+      }
+    }
+  }
+  if (dragVid && pidMap[dragVid]) {
+    primitives.push({ id: String(id++), type: 'coordinate_x',
+      p_id: pidMap[dragVid], x: tx, temporary: true });
+    primitives.push({ id: String(id++), type: 'coordinate_y',
+      p_id: pidMap[dragVid], y: ty, temporary: true });
+  }
+  return { primitives, pidMap };
+}
+
 function solveConstraints(dragVid, tx, ty) {
-  const pending = new Map(); // vid -> {x, y, priority}
-  const decided = new Map(); // vid -> {x, y}
+  if (_gcsReady && typeof PlanegcsLib !== 'undefined') {
+    _solveWithGCS(dragVid, tx, ty);
+  } else {
+    _solveWithBFS(dragVid, tx, ty);
+  }
+}
 
+function _solveWithGCS(dragVid, tx, ty) {
+  const { primitives, pidMap } = buildPrimitives(dragVid, tx, ty);
+  const { status, points } = PlanegcsLib.solve(primitives);
+  if (status === PlanegcsLib.SolveStatus.Failed) {
+    console.warn('[solver] GCS failed, falling back to BFS');
+    _solveWithBFS(dragVid, tx, ty);
+    return;
+  }
+  for (const v of state.vertices) {
+    const pid = pidMap[v.id];
+    if (pid && points[pid]) { v.x = points[pid].x; v.y = points[pid].y; }
+  }
+}
+
+function _solveWithBFS(dragVid, tx, ty) {
+  const pending = new Map(), decided = new Map();
   decided.set(dragVid, { x: tx, y: ty });
-
   function enqueue(vid, x, y, prio) {
     const ex = pending.get(vid);
     if (!ex || prio < ex.priority) pending.set(vid, { x, y, priority: prio });
   }
-
   function propagate(vid, x, y) {
     for (const e of state.edges) {
       const isFrom = e.from === vid, isTo = e.to === vid;
       if (!isFrom && !isTo) continue;
       const nid = isFrom ? e.to : e.from;
       if (decided.has(nid)) continue;
-
       const dir = edgeSolverDir(e);
       if (!dir) continue;
-
       const nb = state.vertices.find(v => v.id === nid);
       if (!nb) continue;
-
       const sign = edgeSign(e, dir) * (isFrom ? 1 : -1);
       const lenPx = edgeLenPx(e);
-
       let nx, ny, prio;
-
       if (dir === "H") {
-        // H辺: yを揃える（方向違反成分・必須・常に伝播）
         ny = y;
-        if (e.constrained) {
-          nx = x + sign * lenPx; // 辺長固定: xも確定
-          prio = 0; // 最高優先
-        } else {
-          nx = nb.x; // 辺長自由: xは吸収（辺長変化）
-          prio = 1;  // y伝播は必須なので中優先（自由辺でも伝播する）
-        }
+        if (e.constrained) { nx = x + sign * lenPx; prio = 0; }
+        else { nx = nb.x; prio = 1; }
       } else {
-        // V辺: xを揃える（方向違反成分・必須・常に伝播）
         nx = x;
-        if (e.constrained) {
-          ny = y + sign * lenPx; // 辺長固定: yも確定
-          prio = 0; // 最高優先
-        } else {
-          ny = nb.y; // 辺長自由: yは吸収
-          prio = 1;  // x伝播は必須なので中優先
-        }
+        if (e.constrained) { ny = y + sign * lenPx; prio = 0; }
+        else { ny = nb.y; prio = 1; }
       }
-
       enqueue(nid, nx, ny, prio);
     }
   }
-
   propagate(dragVid, tx, ty);
-
   let safety = 0;
   while (pending.size > 0 && safety++ < 200) {
     let bestId = null, bestEntry = null;
     for (const [vid, entry] of pending) {
-      if (!bestEntry || entry.priority < bestEntry.priority) {
-        bestId = vid; bestEntry = entry;
-      }
+      if (!bestEntry || entry.priority < bestEntry.priority) { bestId = vid; bestEntry = entry; }
     }
     pending.delete(bestId);
     if (decided.has(bestId)) continue;
     decided.set(bestId, { x: bestEntry.x, y: bestEntry.y });
     propagate(bestId, bestEntry.x, bestEntry.y);
   }
-
-  // 確定座標を反映
   for (const [vid, pos] of decided) {
     const v = state.vertices.find(vv => vv.id === vid);
     if (v) { v.x = pos.x; v.y = pos.y; }
   }
 }
 
-/**
- * 「対辺の自動拘束」（直角四角形専用）
- *
- * 全頂点が90°角度拘束されている4頂点の閉ループ（長方形）において、
- * 対辺（H辺同士・V辺同士のペア）の一方が辺長拘束されたら、
- * 他方も自動的に辺長拘束する（対辺は数学的に同じ長さになるため）。
- *
- * 適用条件: ループを構成する全頂点が {type:"angle", value:90} を持つ場合のみ。
- * 任意角度拘束の頂点が混在する場合は発動しない（このロジックを変更せず
- * 別途 inferXxxConstraints() を追加することで対応する設計）。
- */
-function inferRectangleConstraints() {
-  let changed = false;
-
-  // 4頂点・4辺の閉ループを総当たりで検出
-  // (このPWAでは初期長方形が複数生成されることは想定していないため
-  //  「全頂点が90度拘束されたH/V辺のみの閉路」を探索する簡易実装)
-  const dirEdges = state.edges.filter(e => edgeSolverDir(e));
-
-  // 頂点ごとの隣接辺マップ
-  const adj = {};
-  for (const e of dirEdges) {
-    (adj[e.from] = adj[e.from] || []).push(e);
-    (adj[e.to] = adj[e.to] || []).push(e);
-  }
-
-  // 全頂点が90度拘束されているかチェック
-  function has90(vid) {
-    const v = state.vertices.find(vv => vv.id === vid);
-    if (!v || !v.constraints) return false;
-    return v.constraints.some(c => c.type === "angle" && c.value === 90);
-  }
-
-  // H辺・V辺それぞれを「対辺ペア」として検出する単純なロジック：
-  // 同じ閉ループ内でH辺が2本ちょうどあり、両方の両端頂点が90度拘束済みなら対辺とみなす
-  // ループ検出は簡易的に「4頂点ループ」を辺の接続関係から探す
-  const visited4 = new Set();
-  for (const startE of dirEdges) {
-    // startEのfromから幅優先で4辺以内に戻ってくるサイクルを探す（4頂点ループ限定）
-    const loop = findFourVertexLoop(startE.from, dirEdges);
-    if (!loop) continue;
-    const key = loop.vertexIds.slice().sort().join(",");
-    if (visited4.has(key)) continue;
-
-    // ループの全頂点が90度拘束済みか確認
-    if (!loop.vertexIds.every(has90)) continue;
-    visited4.add(key);
-
-    // ループのH辺ペア・V辺ペアを対辺として処理
-    const hEdges = loop.edges.filter(e => edgeSolverDir(e) === "H");
-    const vEdges = loop.edges.filter(e => edgeSolverDir(e) === "V");
-
-    for (const pair of [hEdges, vEdges]) {
-      if (pair.length !== 2) continue;
-      const [e1, e2] = pair;
-      if (e1.constrained && !e2.constrained && e1.measurement.status === "measured") {
-        e2.constrained = true;
-        e2.measurement.status = "measured";
-        e2.measurement.length_m = e1.measurement.length_m;
-        e2.measurement.measured_at = null; // 自動算出は測定日時なし
-        e2.autoConstrained = true;
-        changed = true;
-      } else if (e2.constrained && !e1.constrained && e2.measurement.status === "measured") {
-        e1.constrained = true;
-        e1.measurement.status = "measured";
-        e1.measurement.length_m = e2.measurement.length_m;
-        e1.measurement.measured_at = null;
-        e1.autoConstrained = true;
-        changed = true;
-      }
-    }
-  }
-
-  return changed;
-}
-
-/**
- * startVidから方向拘束辺のみを辿り、4頂点で元に戻る閉路を探す（簡易版）
- * 戻り値: { vertexIds:[...], edges:[...] } または null
- */
-function findFourVertexLoop(startVid, dirEdges) {
-  function neighbors(vid) {
-    return dirEdges
-      .filter(e => e.from === vid || e.to === vid)
-      .map(e => ({ nid: e.from === vid ? e.to : e.from, edge: e }));
-  }
-  // DFSで深さ4のパスを探索し、4番目がstartVidに戻るか確認
-  function dfs(path, edgePath, depth) {
-    if (depth === 4) {
-      return path[path.length - 1] === startVid
-        ? { vertexIds: path.slice(0, 4), edges: edgePath }
-        : null;
-    }
-    const last = path[path.length - 1];
-    for (const { nid, edge } of neighbors(last)) {
-      if (edgePath.includes(edge)) continue;
-      if (depth < 3 && path.includes(nid)) continue;
-      const result = dfs([...path, nid], [...edgePath, edge], depth + 1);
-      if (result) return result;
-    }
-    return null;
-  }
-  return dfs([startVid], [], 0);
-}
-
-/**
- * 測定済み辺が1本以上ある場合のみ実行。
- * 起点: 測定済み拘束辺を最も多く持つ頂点（その頂点の現在座標は動かさない）
- */
 function recomputeLayout() {
   if (!state.scalePxPerMeter) return;
-
-  // 測定済み・方向拘束あり辺のみ対象
-  const activEdges = state.edges.filter(
-    e => e.constrained && edgeSolverDir(e) && e.measurement.status === "measured"
-  );
+  const activEdges = state.edges.filter(e => e.constrained && edgeSolverDir(e) && e.measurement.status === "measured");
   if (activEdges.length === 0) return;
-
-  // 各頂点の接続する活性辺数を集計
   const score = {};
   for (const v of state.vertices) score[v.id] = 0;
-  for (const e of activEdges) {
-    score[e.from] = (score[e.from] || 0) + 1;
-    score[e.to]   = (score[e.to]   || 0) + 1;
-  }
-
-  // 最高スコアの頂点を起点に
+  for (const e of activEdges) { score[e.from] = (score[e.from]||0)+1; score[e.to] = (score[e.to]||0)+1; }
   let bestVid = null, bestScore = -1;
-  for (const [vid, s] of Object.entries(score)) {
-    if (s > bestScore) { bestScore = s; bestVid = vid; }
-  }
+  for (const [vid, s] of Object.entries(score)) { if (s > bestScore) { bestScore = s; bestVid = vid; } }
   if (!bestVid) return;
-
   const anchor = state.vertices.find(v => v.id === bestVid);
   solveConstraints(bestVid, anchor.x, anchor.y);
   render();
 }
 
-let _snapActive = false; // 後方互換のため保持
+let _snapActive = false;
+
 
 canvas.addEventListener("pointerdown", (evt) => {
   canvas.setPointerCapture(evt.pointerId);
@@ -2564,6 +2447,9 @@ function init() {
   resizeCanvas();
   updateStats();
   if (restored) showToast("前回のデータを復元しました");
+
+  // planegcs を非同期で初期化（完了前はBFSで動作）
+  initPlanegcs();
 }
 
 init();
