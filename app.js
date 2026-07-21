@@ -40,7 +40,7 @@ const state = {
 };
 
 /* ---------- バージョン ---------- */
-const APP_VERSION = "0.15.2"; // saveDragInitial未定義エラー修正
+const APP_VERSION = "0.15.3"; // 拘束辺の寸法表示を測定値固定・recomputeLayout頂点固定
 
 /* ---------- 調整可能パラメータ（合意事項①: 感度調整） ---------- */
 const VERTEX_HIT_RADIUS = 34;        // 頂点ヒット半径(px) 26→34に拡大
@@ -734,8 +734,11 @@ function drawEdgeLabel(item, v1, v2) {
 
   let label;
   if (m.status === "measured") {
-    // スケールあり: 現在のpx距離をmに換算してリアルタイム表示
-    if (state.scalePxPerMeter) {
+    if (item.constrained && m.length_m != null) {
+      // 拘束あり辺: 測定値を正として表示（GCSが頂点を動かしても表示が変わらない）
+      label = `${m.length_m.toFixed(3)}m`;
+    } else if (state.scalePxPerMeter) {
+      // 拘束なし測定済み辺: ドラッグ中は現在のpx距離から換算してリアルタイム表示
       const currentM = currentPx / state.scalePxPerMeter;
       label = `${currentM.toFixed(3)}m`;
     } else {
@@ -1212,10 +1215,14 @@ function buildPrimitives(dragVid, tx, ty) {
   let id = 1;
   const pidMap = {};
   const originId = state.coordinateSystem && state.coordinateSystem.originId;
+  const isDrag = dragVid !== null && tx !== null && ty !== null;
   for (const v of state.vertices) {
     const pid = String(id++);
     pidMap[v.id] = pid;
-    primitives.push({ id: pid, type: 'point', x: v.x, y: v.y, fixed: v.id === originId });
+    // ドラッグ時: 原点のみ固定、他はGCSが解く
+    // recomputeLayout時(dragVid=null): 全頂点固定（頂点座標を変えない）
+    const fixed = !isDrag || v.id === originId;
+    primitives.push({ id: pid, type: 'point', x: v.x, y: v.y, fixed });
   }
   for (const e of state.edges) {
     const dir = edgeSolverDir(e);
