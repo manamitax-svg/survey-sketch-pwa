@@ -40,7 +40,7 @@ const state = {
 };
 
 /* ---------- バージョン ---------- */
-const APP_VERSION = "0.15.5"; // 対辺自動拘束の冗長な距離拘束を解消（左右辺ドラッグが効かない不具合を修正）
+const APP_VERSION = "0.15.6"; // 編集ペイン開閉時にcanvas実サイズが追従しない不具合をResizeObserverで修正
 
 /* ---------- 調整可能パラメータ（合意事項①: 感度調整） ---------- */
 const VERTEX_HIT_RADIUS = 34;        // 頂点ヒット半径(px) 26→34に拡大
@@ -122,6 +122,15 @@ function resizeCanvas() {
   render();
 }
 window.addEventListener("resize", resizeCanvas);
+
+// 編集用ペイン（測距フォーム・高さ入力・音源一覧・スケール校正等）の開閉で
+// #canvas-wrap のCSS上のサイズが変化しても、windowのresizeイベントは
+// 発火しないためcanvasの実ピクセルサイズが追従せず、
+// 下部の描画領域が隠れる/解放されない不具合があった。
+// canvas-wrap自体のサイズ変化をResizeObserverで直接監視することで、
+// どのペインの開閉でも確実にcanvasサイズを再同期する。
+const _canvasWrapResizeObserver = new ResizeObserver(() => resizeCanvas());
+_canvasWrapResizeObserver.observe(document.getElementById("canvas-wrap"));
 
 /* ============================================================
    Douglas-Peucker 直線化 + 角度スナップ
