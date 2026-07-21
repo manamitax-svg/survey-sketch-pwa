@@ -40,7 +40,7 @@ const state = {
 };
 
 /* ---------- バージョン ---------- */
-const APP_VERSION = "0.15.7"; // トポロジ変更後にautoConstrained辺の冗長性を再検証し実拘束へ格上げ（拘束違反ドラッグを修正）
+const APP_VERSION = "0.15.8"; // 角度拘束・辺長拘束を両方解除しても辺directionが残り水平垂直に限定される不具合を修正
 
 /* ---------- 調整可能パラメータ（合意事項①: 感度調整） ---------- */
 const VERTEX_HIT_RADIUS = 34;        // 頂点ヒット半径(px) 26→34に拡大
@@ -862,15 +862,37 @@ function syncEdgeDirectionForVertex(v, enabling) {
       e.direction = { type: dx >= dy ? "horizontal" : "vertical" };
     } else {
       // 角度拘束解除:
-      // direction は null にしない（辺長拘束を維持するためソルバーが追跡できる状態を保つ）
-      // 現在の頂点位置から H/V を再判定して direction を更新するだけ
-      if (e.direction) {
-        // すでに direction があれば現状の頂点位置で再判定
-        const dx = Math.abs(other.x - v.x), dy = Math.abs(other.y - v.y);
-        e.direction = { type: dx >= dy ? "horizontal" : "vertical" };
+      // 辺長拘束が残っている場合は direction を維持する（ソルバーが辺長を
+      // 追跡できる状態を保つため）。辺長拘束も無ければ、その辺は
+      // どちらの端点からも角度拘束されていないか再確認したうえで
+      // direction を解放し、自由な方向へドラッグできるようにする。
+      if (e.constrained) {
+        if (e.direction) {
+          const dx = Math.abs(other.x - v.x), dy = Math.abs(other.y - v.y);
+          e.direction = { type: dx >= dy ? "horizontal" : "vertical" };
+        }
+      } else {
+        maybeClearEdgeDirection(e);
       }
-      // direction がなければそのまま（もともと方向拘束なし辺）
     }
+  }
+}
+
+/**
+ * 辺のdirection（H/V方向拘束）を解放してよいか判定し、解放する。
+ * 辺長拘束が残っている、または両端点のどちらかに角度拘束（90°）が
+ * 残っている間は、direction をソルバーの追跡用に維持する必要がある。
+ * どちらも無くなって初めて direction を null にし、自由な方向への
+ * ドラッグを許可する。
+ */
+function maybeClearEdgeDirection(e) {
+  if (e.constrained) return;
+  const has90 = (vid) => {
+    const v = state.vertices.find(vv => vv.id === vid);
+    return !!(v && v.constraints && v.constraints.some(c => c.type === "angle" && c.value === 90));
+  };
+  if (!has90(e.from) && !has90(e.to)) {
+    e.direction = null;
   }
 }
 
@@ -931,6 +953,7 @@ function openEdgeCtxMenu(e, screenX, screenY) {
         e.measurement.status = "invalidated";
         e.measurement.previous_length_m = e.measurement.length_m;
         e.measurement.length_m = null;
+        maybeClearEdgeDirection(e);
         updateStats(); persistState(); render();
         showToast(`辺 ${e.id} の拘束を解除しました`);
       },
