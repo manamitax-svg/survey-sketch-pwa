@@ -40,7 +40,7 @@ const state = {
 };
 
 /* ---------- バージョン ---------- */
-const APP_VERSION = "0.15.0"; // planegcs ソルバー導入
+const APP_VERSION = "0.15.1"; // 不具合1・2修正（inferRectangle復元・closeMeasureForm修正）
 
 /* ---------- 調整可能パラメータ（合意事項①: 感度調整） ---------- */
 const VERTEX_HIT_RADIUS = 34;        // 頂点ヒット半径(px) 26→34に拡大
@@ -1314,6 +1314,77 @@ function _solveWithBFS(dragVid, tx, ty) {
   }
 }
 
+function inferRectangleConstraints() {
+  let changed = false;
+  const dirEdges = state.edges.filter(e => edgeSolverDir(e));
+
+  function has90(vid) {
+    const v = state.vertices.find(vv => vv.id === vid);
+    if (!v || !v.constraints) return false;
+    return v.constraints.some(c => c.type === "angle" && c.value === 90);
+  }
+
+  const visited4 = new Set();
+  for (const startE of dirEdges) {
+    const loop = findFourVertexLoop(startE.from, dirEdges);
+    if (!loop) continue;
+    const key = loop.vertexIds.slice().sort().join(",");
+    if (visited4.has(key)) continue;
+    if (!loop.vertexIds.every(has90)) continue;
+    visited4.add(key);
+
+    const hEdges = loop.edges.filter(e => edgeSolverDir(e) === "H");
+    const vEdges = loop.edges.filter(e => edgeSolverDir(e) === "V");
+
+    for (const pair of [hEdges, vEdges]) {
+      if (pair.length !== 2) continue;
+      const [e1, e2] = pair;
+      if (e1.constrained && !e2.constrained && e1.measurement.status === "measured") {
+        e2.constrained = true;
+        e2.measurement.status = "measured";
+        e2.measurement.length_m = e1.measurement.length_m;
+        e2.measurement.estimated_length_m = e1.measurement.length_m; // ラベル表示用
+        e2.measurement.measured_at = null;
+        e2.autoConstrained = true;
+        changed = true;
+      } else if (e2.constrained && !e1.constrained && e2.measurement.status === "measured") {
+        e1.constrained = true;
+        e1.measurement.status = "measured";
+        e1.measurement.length_m = e2.measurement.length_m;
+        e1.measurement.estimated_length_m = e2.measurement.length_m; // ラベル表示用
+        e1.measurement.measured_at = null;
+        e1.autoConstrained = true;
+        changed = true;
+      }
+    }
+  }
+  return changed;
+}
+
+function findFourVertexLoop(startVid, dirEdges) {
+  function neighbors(vid) {
+    return dirEdges
+      .filter(e => e.from === vid || e.to === vid)
+      .map(e => ({ nid: e.from === vid ? e.to : e.from, edge: e }));
+  }
+  function dfs(path, edgePath, depth) {
+    if (depth === 4) {
+      return path[path.length - 1] === startVid
+        ? { vertexIds: path.slice(0, 4), edges: edgePath }
+        : null;
+    }
+    const last = path[path.length - 1];
+    for (const { nid, edge } of neighbors(last)) {
+      if (edgePath.includes(edge)) continue;
+      if (depth < 3 && path.includes(nid)) continue;
+      const result = dfs([...path, nid], [...edgePath, edge], depth + 1);
+      if (result) return result;
+    }
+    return null;
+  }
+  return dfs([startVid], [], 0);
+}
+
 function recomputeLayout() {
   if (!state.scalePxPerMeter) return;
   const activEdges = state.edges.filter(e => e.constrained && edgeSolverDir(e) && e.measurement.status === "measured");
@@ -1685,6 +1756,8 @@ function openMeasureForm(target, kind) {
 function closeMeasureForm() {
   state.pendingMeasureTarget = null;
   document.getElementById("measure-form").classList.remove("visible");
+  // rectScalePanel が残っていれば閉じる
+  document.getElementById("rectScalePanel").classList.remove("visible");
   document.getElementById("hintText").style.display = "block";
   render();
 }
