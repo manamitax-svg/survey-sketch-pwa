@@ -40,7 +40,7 @@ const state = {
 };
 
 /* ---------- バージョン ---------- */
-const APP_VERSION = "0.15.6"; // 編集ペイン開閉時にcanvas実サイズが追従しない不具合をResizeObserverで修正
+const APP_VERSION = "0.15.7"; // トポロジ変更後にautoConstrained辺の冗長性を再検証し実拘束へ格上げ（拘束違反ドラッグを修正）
 
 /* ---------- 調整可能パラメータ（合意事項①: 感度調整） ---------- */
 const VERTEX_HIT_RADIUS = 34;        // 頂点ヒット半径(px) 26→34に拡大
@@ -401,6 +401,7 @@ function deleteVertex(vertexId) {
   state.diagonals = state.diagonals.filter(d => d.from !== vertexId && d.to !== vertexId);
   state.vertices = state.vertices.filter(v => v.id !== vertexId);
   delete state.heights[vertexId];
+  revalidateAutoConstraints();
   updateStats();
   persistState();
   render();
@@ -415,6 +416,7 @@ function insertVertexOnEdge(edgeId, x, y) {
   state.edges.splice(idx, 1);
   addEdge(edge.from, newV.id);
   addEdge(newV.id, edge.to);
+  revalidateAutoConstraints();
   updateStats();
   persistState();
   render();
@@ -1085,6 +1087,7 @@ function buildRectProtrusion(edge, widthM, depthM) {
     eT2_B2.measurement.estimated_length_m = depthM;
   }
 
+  revalidateAutoConstraints();
   updateStats();
   persistState();
   render();
@@ -1385,6 +1388,38 @@ function inferRectangleConstraints() {
     }
   }
   return changed;
+}
+
+/**
+ * autoConstrained（対辺自動算出）辺の妥当性を再検証する。
+ * inferRectangleConstraints() による対辺自動拘束は「単純な4頂点の直角ループ」
+ * であることを前提に、対辺への距離拘束をソルバーへ送らず冗長性を排除している
+ * （buildPrimitives参照）。しかし矩形突出しや頂点削除・辺分割でループが
+ * 複雑化すると、この冗長性の保証が崩れ、対辺の長さが実際には拘束されない
+ * まま「拘束済み」表示だけが残ってしまう（ドラッグで辺長が変わってしまう
+ * のに寸法表示が更新されない不具合の原因）。
+ * トポロジ変更のたびに呼び出し、単純ループでなくなったautoConstrained辺は
+ * 明示拘束（autoConstrained=false）に格上げし、ソルバーに実際の距離拘束
+ * として渡されるようにする（測定値・表示はそのまま維持）。
+ */
+function revalidateAutoConstraints() {
+  const dirEdges = state.edges.filter(e => edgeSolverDir(e));
+  function has90(vid) {
+    const v = state.vertices.find(vv => vv.id === vid);
+    return !!(v && v.constraints && v.constraints.some(c => c.type === "angle" && c.value === 90));
+  }
+  for (const e of state.edges) {
+    if (!e.autoConstrained) continue;
+    const loop = findFourVertexLoop(e.from, dirEdges);
+    const dir = edgeSolverDir(e);
+    const stillValid = !!loop
+      && loop.edges.includes(e)
+      && loop.vertexIds.every(has90)
+      && loop.edges.some(le => le !== e && edgeSolverDir(le) === dir && le.constrained && le.measurement.status === "measured");
+    if (!stillValid) {
+      e.autoConstrained = false; // 冗長性の保証が崩れたため明示拘束としてソルバーに渡す
+    }
+  }
 }
 
 function findFourVertexLoop(startVid, dirEdges) {
