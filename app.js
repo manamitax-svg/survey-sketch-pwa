@@ -40,7 +40,7 @@ const state = {
 };
 
 /* ---------- バージョン ---------- */
-const APP_VERSION = "0.15.1"; // 不具合1・2修正（inferRectangle復元・closeMeasureForm修正）
+const APP_VERSION = "0.15.2"; // saveDragInitial未定義エラー修正
 
 /* ---------- 調整可能パラメータ（合意事項①: 感度調整） ---------- */
 const VERTEX_HIT_RADIUS = 34;        // 頂点ヒット半径(px) 26→34に拡大
@@ -1401,6 +1401,8 @@ function recomputeLayout() {
 }
 
 let _snapActive = false;
+
+function saveDragInitial() {} // GCSソルバーでは不要（後方互換のため残す）
 
 
 canvas.addEventListener("pointerdown", (evt) => {
