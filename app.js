@@ -40,7 +40,7 @@ const state = {
 };
 
 /* ---------- バージョン ---------- */
-const APP_VERSION = "0.15.4"; // 要確認(invalidated)辺の寸法表示をドラッグ中リアルタイム再計算に修正
+const APP_VERSION = "0.15.5"; // 対辺自動拘束の冗長な距離拘束を解消（左右辺ドラッグが効かない不具合を修正）
 
 /* ---------- 調整可能パラメータ（合意事項①: 感度調整） ---------- */
 const VERTEX_HIT_RADIUS = 34;        // 頂点ヒット半径(px) 26→34に拡大
@@ -1238,7 +1238,11 @@ function buildPrimitives(dragVid, tx, ty) {
     const lid = String(id++);
     primitives.push({ id: lid, type: 'line', p1_id: p1id, p2_id: p2id });
     primitives.push({ id: String(id++), type: dir === 'H' ? 'horizontal_l' : 'vertical_l', l_id: lid });
-    if (e.constrained) {
+    // autoConstrained辺（対辺自動算出）は、方向拘束+ループ閉合条件から
+    // 幾何学的に長さが導出されるため、ここで明示的な距離拘束を追加すると
+    // 冗長拘束（過拘束）となりヤコビ行列が特異になってドラッグが効かなくなる。
+    // よってソルバーには渡さず、表示・YAML出力上のみ「測定値」として扱う。
+    if (e.constrained && !e.autoConstrained) {
       const lenPx = edgeLenPx(e);
       if (lenPx > 0) {
         primitives.push({ id: String(id++), type: 'p2p_distance',
