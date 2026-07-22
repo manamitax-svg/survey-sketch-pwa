@@ -1,4 +1,4 @@
-const CACHE_NAME = "survey-sketch-cache-v17";
+const CACHE_NAME = "survey-sketch-cache-v23";
 const ASSETS = [
   "./index.html",
   "./app.js",

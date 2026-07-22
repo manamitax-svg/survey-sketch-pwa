@@ -40,7 +40,7 @@ const state = {
 };
 
 /* ---------- バージョン ---------- */
-const APP_VERSION = "0.15.8"; // 角度拘束・辺長拘束を両方解除しても辺directionが残り水平垂直に限定される不具合を修正
+const APP_VERSION = "0.15.13"; // 辺長拘束解除時にrevalidateAutoConstraintsを呼び忘れていた不具合を修正。BFSフォールバック警告UIを追加
 
 /* ---------- 調整可能パラメータ（合意事項①: 感度調整） ---------- */
 const VERTEX_HIT_RADIUS = 34;        // 頂点ヒット半径(px) 26→34に拡大
@@ -362,12 +362,16 @@ function commitPolygon(rawPoints) {
 }
 
 function invalidateEdgesOfVertex(vertexId, opts = {}) {
-  const skipDir = opts.skipDirectionConstrained || false;
+  const skipSolverMaintained = opts.skipDirectionConstrained || false;
   let changed = false;
   for (const e of state.edges) {
     if (!(e.from === vertexId || e.to === vertexId)) continue;
-    // 方向拘束あり辺はソルバーが整合性を保つのでスキップ
-    if (skipDir && e.direction) continue;
+    // ソルバーが実際に維持している辺（direction=H/V拘束、または
+    // 辺長拘束=p2p_distance のいずれか）はスキップする。
+    // 以前は e.direction の有無だけで判定しており、辺長拘束のみで
+    // 維持されている辺（角度拘束なし）まで誤って「要確認」にしてしまう
+    // 不具合があった。
+    if (skipSolverMaintained && (e.direction || e.constrained)) continue;
     if (e.measurement.status === "measured") {
       e.measurement.previous_length_m = e.measurement.length_m;
       e.measurement.status = "invalidated";
@@ -862,31 +866,23 @@ function syncEdgeDirectionForVertex(v, enabling) {
       e.direction = { type: dx >= dy ? "horizontal" : "vertical" };
     } else {
       // 角度拘束解除:
-      // 辺長拘束が残っている場合は direction を維持する（ソルバーが辺長を
-      // 追跡できる状態を保つため）。辺長拘束も無ければ、その辺は
-      // どちらの端点からも角度拘束されていないか再確認したうえで
-      // direction を解放し、自由な方向へドラッグできるようにする。
-      if (e.constrained) {
-        if (e.direction) {
-          const dx = Math.abs(other.x - v.x), dy = Math.abs(other.y - v.y);
-          e.direction = { type: dx >= dy ? "horizontal" : "vertical" };
-        }
-      } else {
-        maybeClearEdgeDirection(e);
-      }
+      // direction（H/V方向）は角度拘束（90°）の有無だけで判定する。
+      // 辺長拘束(p2p_distance)は方向を問わず機能するため、辺長拘束が
+      // 残っていることを理由に direction を維持する必要はない
+      // （以前はこれを混同しており、角度解除しても辺長拘束が残る限り
+      // 水平垂直に固定されたままになる不具合の原因だった）。
+      maybeClearEdgeDirection(e);
     }
   }
 }
 
 /**
  * 辺のdirection（H/V方向拘束）を解放してよいか判定し、解放する。
- * 辺長拘束が残っている、または両端点のどちらかに角度拘束（90°）が
- * 残っている間は、direction をソルバーの追跡用に維持する必要がある。
- * どちらも無くなって初めて direction を null にし、自由な方向への
- * ドラッグを許可する。
+ * direction は角度拘束（90°）専用の仕組みであり、辺長拘束(p2p_distance)
+ * とは独立している。両端点のどちらにも角度拘束が残っていなければ
+ * direction を null にし、自由な方向へのドラッグを許可する。
  */
 function maybeClearEdgeDirection(e) {
-  if (e.constrained) return;
   const has90 = (vid) => {
     const v = state.vertices.find(vv => vv.id === vid);
     return !!(v && v.constraints && v.constraints.some(c => c.type === "angle" && c.value === 90));
@@ -912,6 +908,7 @@ function openVertexCtxMenu(v, screenX, screenY) {
         pushHistory();
         v.constraints = [];
         syncEdgeDirectionForVertex(v, false);
+        revalidateAutoConstraints();
         persistState(); render(); updateStats();
         showToast(`頂点 ${v.id} の拘束を解除しました`);
       },
@@ -954,6 +951,7 @@ function openEdgeCtxMenu(e, screenX, screenY) {
         e.measurement.previous_length_m = e.measurement.length_m;
         e.measurement.length_m = null;
         maybeClearEdgeDirection(e);
+        revalidateAutoConstraints();
         updateStats(); persistState(); render();
         showToast(`辺 ${e.id} の拘束を解除しました`);
       },
@@ -1266,13 +1264,19 @@ function buildPrimitives(dragVid, tx, ty) {
     primitives.push({ id: pid, type: 'point', x: v.x, y: v.y, fixed });
   }
   for (const e of state.edges) {
-    const dir = edgeSolverDir(e);
-    if (!dir) continue;
     const p1id = pidMap[e.from], p2id = pidMap[e.to];
     if (!p1id || !p2id) continue;
-    const lid = String(id++);
-    primitives.push({ id: lid, type: 'line', p1_id: p1id, p2_id: p2id });
-    primitives.push({ id: String(id++), type: dir === 'H' ? 'horizontal_l' : 'vertical_l', l_id: lid });
+    const dir = edgeSolverDir(e);
+    // direction（H/V）が無い辺でも、辺長拘束(p2p_distance)は独立して
+    // ソルバーに送る必要がある。以前は dir が無い辺をここで continue
+    // していたため、line/horizontal_l/vertical_l だけでなく p2p_distance
+    // まで丸ごとスキップされてしまい、角度拘束のない辺長拘束辺が
+    // 完全に無視される不具合の原因になっていた。
+    if (dir) {
+      const lid = String(id++);
+      primitives.push({ id: lid, type: 'line', p1_id: p1id, p2_id: p2id });
+      primitives.push({ id: String(id++), type: dir === 'H' ? 'horizontal_l' : 'vertical_l', l_id: lid });
+    }
     // autoConstrained辺（対辺自動算出）は、方向拘束+ループ閉合条件から
     // 幾何学的に長さが導出されるため、ここで明示的な距離拘束を追加すると
     // 冗長拘束（過拘束）となりヤコビ行列が特異になってドラッグが効かなくなる。
@@ -1294,10 +1298,16 @@ function buildPrimitives(dragVid, tx, ty) {
   return { primitives, pidMap };
 }
 
+// 直前のsolveConstraints呼び出しがBFSフォールバック経由だったかを追跡する。
+// GCSが未初期化、または solve() が Failed を返した場合に true になる。
+// ドラッグ終了時にこれを見て、拘束が正しく解けていない可能性をユーザーに警告する。
+let _lastSolveUsedFallback = false;
+
 function solveConstraints(dragVid, tx, ty) {
   if (_gcsReady && typeof PlanegcsLib !== 'undefined') {
     _solveWithGCS(dragVid, tx, ty);
   } else {
+    _lastSolveUsedFallback = true;
     _solveWithBFS(dragVid, tx, ty);
   }
 }
@@ -1307,9 +1317,11 @@ function _solveWithGCS(dragVid, tx, ty) {
   const { status, points } = PlanegcsLib.solve(primitives);
   if (status === PlanegcsLib.SolveStatus.Failed) {
     console.warn('[solver] GCS failed, falling back to BFS');
+    _lastSolveUsedFallback = true;
     _solveWithBFS(dragVid, tx, ty);
     return;
   }
+  _lastSolveUsedFallback = false;
   for (const v of state.vertices) {
     const pid = pidMap[v.id];
     if (pid && points[pid]) { v.x = points[pid].x; v.y = points[pid].y; }
@@ -1655,15 +1667,13 @@ canvas.addEventListener("pointermove", (evt) => {
     if (state.draggedVertexMoved) {
       const v = state.selectedVertex;
       _snapActive = false;
-      const hasDirectionEdge = state.edges.some(
-        e => (e.from === v.id || e.to === v.id) && e.direction
-      );
-      if (hasDirectionEdge) {
-        solveConstraints(v.id, pos.x, pos.y);
-      } else {
-        v.x = pos.x;
-        v.y = pos.y;
-      }
+      // 常にソルバー経由で解決する。以前はdirection(H/V)拘束を持つ辺が
+      // 無い頂点はソルバーを完全にバイパスして直接座標を書き換えていたが、
+      // これだと辺長拘束(p2p_distance)しか持たない頂点（角度拘束なし）の
+      // 場合に拘束が一切無視されて自由に動いてしまう不具合があった。
+      // solveConstraints側は拘束が無い場合でも問題なくドラッグ目標へ
+      // 収束するため、常に呼び出して問題ない。
+      solveConstraints(v.id, pos.x, pos.y);
       render();
     }
   }
@@ -1703,6 +1713,11 @@ canvas.addEventListener("pointerup", (evt) => {
     if (state.selectedVertex && state.draggedVertexMoved) {
       // 方向拘束なし辺のみ invalidated にする（方向拘束辺はソルバーが整合性を保つ）
       invalidateEdgesOfVertex(state.selectedVertex.id, { skipDirectionConstrained: true });
+      if (_lastSolveUsedFallback) {
+        // 直前のドラッグ解決がBFSフォールバック（GCS未初期化 or Failed）経由だった場合、
+        // 拘束が正しく満たされていない可能性があるため警告する。
+        showToast("⚠️ ソルバーがフォールバック処理で解決しました。拘束が満たされていない可能性があります");
+      }
       updateStats();
       persistState();
     } else if (!state.draggedVertexMoved && state.history.length > 0) {
