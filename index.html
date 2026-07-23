@@ -313,6 +313,7 @@
     <div class="header-right">
       <span id="versionBadge" style="font-size:0.6rem;color:var(--color-text-dim);letter-spacing:0.03em;"></span>
       <span id="modeBadge" class="mode-badge mode-draw">DRAW</span>
+      <button class="icon-btn" id="sitesBtn" title="現場データ">📁</button>
       <button class="icon-btn" id="metaBtn" title="現場情報">ℹ️</button>
     </div>
   </header>
@@ -487,6 +488,40 @@
       <button id="confirmSource">確定</button>
       <button class="secondary" id="cancelSource">キャンセル</button>
     </div>
+  </div>
+</div>
+
+<!-- 現場データ管理モーダル -->
+<div class="modal-overlay" id="sites-modal">
+  <div class="modal-box">
+    <h2>現場データ</h2>
+    <div class="form-row" style="margin-bottom:8px;">
+      <button id="saveExternalBtn">💾 この現場データを外部保存</button>
+    </div>
+    <div class="form-row" style="margin-bottom:8px;">
+      <button id="newPhaseBtn" class="secondary">🌱 新しいフェーズとして続ける</button>
+    </div>
+    <div class="form-row" style="margin-bottom:8px;">
+      <button id="newSiteBtn" class="secondary">＋ 新規現場を開始</button>
+    </div>
+    <div class="form-row" style="margin-bottom:4px;">
+      <label style="flex:0 0 auto;">読込</label>
+      <input type="file" id="importFileInput" accept=".json,application/json,text/plain,.txt" style="flex:1;min-width:0;">
+    </div>
+    <div class="panel-title" style="margin-top:12px;">端末内の保存データ（最大<span id="maxSlotsText"></span>件）</div>
+    <div id="sitesList" style="max-height:34vh;overflow-y:auto;"></div>
+    <div class="actions">
+      <button class="secondary" id="closeSitesBtn">閉じる</button>
+    </div>
+  </div>
+</div>
+
+<!-- 汎用確認モーダル -->
+<div class="modal-overlay" id="confirm-modal">
+  <div class="modal-box" style="max-width:380px;">
+    <h2 id="confirmTitle">確認</h2>
+    <div id="confirmMessage" style="font-size:0.8rem;color:var(--color-text-dim);margin-bottom:2px;line-height:1.5;"></div>
+    <div class="actions" id="confirmActions"></div>
   </div>
 </div>
 

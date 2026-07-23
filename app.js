@@ -36,11 +36,14 @@ const state = {
     device: "Android tablet (PWA)",
     notes: "",
     rt60_s: null,
+    siteId: null,             // 現場の内部的な一意ID
+    phaseNo: 1,                // 現場ID内のフェーズ連番
+    lastExternalSavedAt: null, // 直近の外部保存(共有/ダウンロード)日時(ISO)
   },
 };
 
 /* ---------- バージョン ---------- */
-const APP_VERSION = "0.15.13"; // 辺長拘束解除時にrevalidateAutoConstraintsを呼び忘れていた不具合を修正。BFSフォールバック警告UIを追加
+const APP_VERSION = "0.16.1"; // 内部データ外部保存の共有シート非表示、読込ピッカーでGoogle Driveが出ない問題を修正
 
 /* ---------- 調整可能パラメータ（合意事項①: 感度調整） ---------- */
 const VERTEX_HIT_RADIUS = 34;        // 頂点ヒット半径(px) 26→34に拡大
@@ -62,47 +65,154 @@ const SCALE_MAX = 8;
 /* ============================================================
    永続化 (localStorage)
    ============================================================ */
-const STORAGE_KEY = "survey_sketch_state_v2"; // v2: direction フィールド追加
+const STORAGE_KEY = "survey_sketch_state_v2"; // 旧: 単一スロット（後方互換の移行元としてのみ使用）
+const SITES_REGISTRY_KEY = "survey_sketch_sites_v1"; // 端末内保存データの一覧
+const SITE_SLOT_PREFIX = "survey_sketch_slot_v1:";   // 現場・フェーズ毎のスロット
+const MAX_LOCAL_SLOTS = 10; // 端末内自動退避の保持件数上限
+
+function genId() {
+  if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+  return `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function ensureSiteIdentity() {
+  if (!state.meta.siteId) state.meta.siteId = genId();
+  if (!state.meta.phaseNo) state.meta.phaseNo = 1;
+}
+
+function currentCompositeId() {
+  ensureSiteIdentity();
+  return `${state.meta.siteId}_p${state.meta.phaseNo}`;
+}
+
+function loadRegistry() {
+  try {
+    const raw = localStorage.getItem(SITES_REGISTRY_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch (e) { return []; }
+}
+
+function saveRegistry(list) {
+  try { localStorage.setItem(SITES_REGISTRY_KEY, JSON.stringify(list)); } catch (e) { /* ignore */ }
+}
+
+function buildStateSnapshot() {
+  return {
+    vertices: state.vertices, edges: state.edges, diagonals: state.diagonals,
+    heights: state.heights, sources: state.sources,
+    nextVertexId: state.nextVertexId, nextEdgeId: state.nextEdgeId,
+    nextDiagId: state.nextDiagId, nextSourceId: state.nextSourceId,
+    scalePxPerMeter: state.scalePxPerMeter, firstStrokeDone: state.firstStrokeDone,
+    coordinateSystem: state.coordinateSystem,
+    meta: state.meta,
+  };
+}
+
+// ①端末内自動退避：現場・フェーズ(= state.meta.siteId + phaseNo)ごとに
+// 個別スロットへ保存する。MAX_LOCAL_SLOTS件を超えたら、現在編集中の
+// スロット以外で最終更新日時が最も古いものから破棄する。
+function persistToLocalSlot() {
+  ensureSiteIdentity();
+  const compositeId = currentCompositeId();
+  const snapshot = buildStateSnapshot();
+  try {
+    localStorage.setItem(SITE_SLOT_PREFIX + compositeId, JSON.stringify(snapshot));
+  } catch (e) { return; }
+
+  let registry = loadRegistry();
+  const now = new Date().toISOString();
+  const idx = registry.findIndex(r => r.compositeId === compositeId);
+  const entry = {
+    compositeId,
+    siteId: state.meta.siteId,
+    phaseNo: state.meta.phaseNo,
+    siteName: state.meta.site_name || "(無題)",
+    updatedAt: now,
+    lastExternalSavedAt: state.meta.lastExternalSavedAt || null,
+  };
+  if (idx >= 0) registry[idx] = entry; else registry.push(entry);
+
+  if (registry.length > MAX_LOCAL_SLOTS) {
+    registry.sort((a, b) => new Date(a.updatedAt) - new Date(b.updatedAt));
+    while (registry.length > MAX_LOCAL_SLOTS) {
+      const dropIdx = registry.findIndex(r => r.compositeId !== compositeId);
+      if (dropIdx < 0) break;
+      const dropped = registry.splice(dropIdx, 1)[0];
+      try { localStorage.removeItem(SITE_SLOT_PREFIX + dropped.compositeId); } catch (e) { /* ignore */ }
+    }
+  }
+  saveRegistry(registry);
+}
 
 function persistState() {
   try {
-    const snapshot = {
-      vertices: state.vertices, edges: state.edges, diagonals: state.diagonals,
-      heights: state.heights, sources: state.sources,
-      nextVertexId: state.nextVertexId, nextEdgeId: state.nextEdgeId,
-      nextDiagId: state.nextDiagId, nextSourceId: state.nextSourceId,
-      scalePxPerMeter: state.scalePxPerMeter, firstStrokeDone: state.firstStrokeDone,
-      coordinateSystem: state.coordinateSystem,
-      meta: state.meta,
-    };
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(buildStateSnapshot())); // 旧バージョンとの後方互換用
   } catch (e) { /* quota等は無視。次回保存時に再試行 */ }
+  persistToLocalSlot();
+}
+
+// 読み込んだスナップショットに対する旧データ移行処理（フィールド補完）
+function migrateLoadedState() {
+  for (const v of state.vertices) {
+    if (!v.constraints) v.constraints = [];
+  }
+  for (const e of state.edges) {
+    if (e.constrained === undefined) {
+      e.constrained = e.measurement.status === "measured";
+    }
+    if (e.direction === undefined) e.direction = null;
+    if (e.autoConstrained === undefined) e.autoConstrained = false;
+  }
+  if (!state.sources) state.sources = [];
+  if (!state.nextSourceId) state.nextSourceId = state.sources.length;
+  if (!state.coordinateSystem) state.coordinateSystem = { originId: null, xAxisId: null };
+  if (state.meta.rt60_s === undefined) state.meta.rt60_s = null;
+  ensureSiteIdentity();
+  if (state.meta.lastExternalSavedAt === undefined) state.meta.lastExternalSavedAt = null;
 }
 
 function restoreState() {
+  // 新方式：レジストリの中で最終更新日時が最も新しいスロットを復元
+  const registry = loadRegistry();
+  if (registry.length > 0) {
+    registry.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+    const latest = registry[0];
+    try {
+      const raw = localStorage.getItem(SITE_SLOT_PREFIX + latest.compositeId);
+      if (raw) {
+        const snap = JSON.parse(raw);
+        Object.assign(state, snap);
+        migrateLoadedState();
+        return true;
+      }
+    } catch (e) { /* フォールスルーして旧方式を試す */ }
+  }
+  // 旧バージョンからの移行：レジストリが無ければ従来の単一スロットを試す
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return false;
     const snap = JSON.parse(raw);
     Object.assign(state, snap);
-    // 旧データ移行: constraints フィールドが欠落している頂点に補完
-    for (const v of state.vertices) {
-      if (!v.constraints) v.constraints = [];
-    }
-    // 旧データ移行: constrained/direction フィールドが欠落している辺に補完
-    for (const e of state.edges) {
-      if (e.constrained === undefined) {
-        e.constrained = e.measurement.status === "measured";
-      }
-      if (e.direction === undefined) e.direction = null;
-      if (e.autoConstrained === undefined) e.autoConstrained = false;
-    }
-    if (!state.sources) state.sources = [];
-    if (!state.nextSourceId) state.nextSourceId = state.sources.length;
-    if (!state.coordinateSystem) state.coordinateSystem = { originId: null, xAxisId: null };
-    if (state.meta.rt60_s === undefined) state.meta.rt60_s = null;
+    migrateLoadedState();
     return true;
   } catch (e) { return false; }
+}
+
+// 現在の現場・フェーズが、直近の外部保存より新しい編集を含むか
+// （＝端末内には保存されているが外部にはまだ渡していない状態か）
+function isCurrentSiteUnsavedExternally() {
+  if (state.vertices.length === 0) return false;
+  const registry = loadRegistry();
+  const entry = registry.find(r => r.compositeId === currentCompositeId());
+  if (!entry) return true;
+  if (!entry.lastExternalSavedAt) return true;
+  return new Date(entry.updatedAt) > new Date(entry.lastExternalSavedAt);
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
 }
 
 /* ============================================================
@@ -2522,12 +2632,21 @@ document.getElementById("exportBtn").addEventListener("click", () => {
   document.getElementById("output-modal").classList.add("visible");
 });
 
+// YAML出力ファイル名用の日時サフィックス（現地時刻 YYYYMMDD_HHmm）。
+// 同じ現場名で複数回出力しても上書きされず、後段側からも
+// どの時点のデータかが判別できるようにする。
+function timestampSuffix() {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}`;
+}
+
 document.getElementById("shareBtn").addEventListener("click", async () => {
   const yaml = toYaml();
   const safeName = (state.meta.site_name || "survey_record").replace(/[^\w\-]/g, "_");
   // .yaml は Android の共有先アプリに認識されにくいため .txt で共有
   // （内容はYAML形式のまま。Google Drive等で受け取り後に .yaml にリネーム可能）
-  const fileName = `${safeName}.yaml.txt`;
+  const fileName = `${safeName}_${timestampSuffix()}.yaml.txt`;
 
   if (navigator.share && navigator.canShare) {
     const file = new File([yaml], fileName, { type: "text/plain" });
@@ -2575,7 +2694,7 @@ document.getElementById("downloadOutputBtn").addEventListener("click", () => {
   const a = document.createElement("a");
   const safeName = (state.meta.site_name || "survey_record").replace(/[^\w\-]/g, "_");
   a.href = url;
-  a.download = `${safeName}.yaml`;
+  a.download = `${safeName}_${timestampSuffix()}.yaml`;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
@@ -2583,15 +2702,334 @@ document.getElementById("downloadOutputBtn").addEventListener("click", () => {
   showToast("ファイルを保存しました");
 });
 
-document.getElementById("doneBtn").addEventListener("click", () => {
+/* ============================================================
+   現場データ管理（②外部保存 / 現場・フェーズ切替 / 読込）
+   ============================================================ */
+
+// 汎用確認モーダル。buttons: [{label, value, secondary?}]
+// クリックされたボタンの value を解決する Promise を返す。
+function showConfirm({ title, message, buttons }) {
+  return new Promise((resolve) => {
+    document.getElementById("confirmTitle").textContent = title;
+    document.getElementById("confirmMessage").textContent = message;
+    const actionsEl = document.getElementById("confirmActions");
+    actionsEl.innerHTML = "";
+    for (const b of buttons) {
+      const btn = document.createElement("button");
+      btn.textContent = b.label;
+      if (b.secondary) btn.className = "secondary";
+      btn.addEventListener("click", () => {
+        document.getElementById("confirm-modal").classList.remove("visible");
+        resolve(b.value);
+      });
+      actionsEl.appendChild(btn);
+    }
+    document.getElementById("confirm-modal").classList.add("visible");
+  });
+}
+
+// ②外部ストレージへの内部データ明示保存。
+// 保存後、直近外部保存日時(meta.lastExternalSavedAt)を更新して
+// レジストリにも反映する（③のコンフリクト検知に使う）。
+async function exportInternalDataFile() {
+  ensureSiteIdentity();
+  state.meta.lastExternalSavedAt = new Date().toISOString();
+  const snapshot = buildStateSnapshot();
+  const json = JSON.stringify(snapshot, null, 2);
+  const safeName = (state.meta.site_name || "survey_record").replace(/[^\w\-]/g, "_");
+  // .json は Android の共有先アプリに認識されにくいため、YAML共有と同様
+  // .txt で共有する（内容はJSON形式のまま。受け取り後に .json にリネーム可能）
+  const fileName = `${safeName}_p${state.meta.phaseNo}_${timestampSuffix()}.json.txt`;
+  persistState(); // lastExternalSavedAtの更新を退避・レジストリに反映
+
+  if (navigator.share && navigator.canShare) {
+    // application/json はAndroidの共有先アプリ（Google Drive含む）に
+    // ファイルとして認識されないことが多く、canShare()がfalseを返して
+    // 共有シートを開かずに無言でダウンロードへフォールバックしてしまう。
+    // YAML共有と同様 text/plain として渡すことで共有シートに正しく載る。
+    const file = new File([json], fileName, { type: "text/plain" });
+    if (navigator.canShare({ files: [file] })) {
+      try {
+        await navigator.share({ title: fileName, files: [file] });
+        return;
+      } catch (e) {
+        if (e.name === "AbortError") return;
+      }
+    }
+  }
+
+  // テキストとして共有
+  if (navigator.share) {
+    try {
+      await navigator.share({ title: fileName, text: json });
+      return;
+    } catch (e) {
+      if (e.name === "AbortError") return;
+    }
+  }
+
+  // フォールバック: ダウンロード
+  showToast("共有非対応のブラウザです。ダウンロードします。");
+  const blob = new Blob([json], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = fileName;
+  document.body.appendChild(a); a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  showToast("現場データを保存しました");
+}
+
+// 現在のスケッチ・ビュー表示をstateの内容に合わせて更新する
+// （現場切替・新規現場・読込のいずれの後にも呼ぶ共通処理）
+function afterStateSwitch() {
+  view.scale = 1; view.offsetX = 0; view.offsetY = 0;
+  document.getElementById("appTitle").textContent =
+    state.meta.site_name ? `🏗 ${state.meta.site_name}` : "🏗 現場実測スケッチ";
+  if (state.scalePxPerMeter) {
+    document.getElementById("scaleBadge").classList.add("visible");
+    document.getElementById("scaleValue").textContent = `${state.scalePxPerMeter.toFixed(1)} px/m`;
+  } else {
+    document.getElementById("scaleBadge").classList.remove("visible");
+  }
+  state.selectedVertex = null;
+  state.history = [];
+  updateStats();
+  resizeCanvas();
+  render();
+  persistState();
+}
+
+// 現在の現場データが外部未保存なら、先に保存するかどうかを確認する。
+// 戻り値: 続行してよければ true、キャンセルなら false。
+async function confirmDiscardIfUnsaved(actionLabel) {
+  if (!isCurrentSiteUnsavedExternally()) return true;
+  const choice = await showConfirm({
+    title: "確認",
+    message: `現在の現場データは外部保存されていません。${actionLabel}前に保存しますか？`,
+    buttons: [
+      { label: "保存してから続ける", value: "save" },
+      { label: "保存せず続ける", value: "discard" },
+      { label: "キャンセル", value: "cancel", secondary: true },
+    ],
+  });
+  if (choice === "cancel") return false;
+  if (choice === "save") await exportInternalDataFile();
+  return true;
+}
+
+function resetStateForNewSite() {
+  state.vertices = [];
+  state.edges = [];
+  state.diagonals = [];
+  state.heights = {};
+  state.sources = [];
+  state.nextVertexId = 0; state.nextEdgeId = 0; state.nextDiagId = 0; state.nextSourceId = 0;
+  state.coordinateSystem = { originId: null, xAxisId: null };
+  state.scalePxPerMeter = null;
+  state.firstStrokeDone = false;
+  state.selectedVertex = null;
+  state.history = [];
+  state.meta = {
+    schema_version: "1.0", site_name: "", surveyor: "", survey_date: "",
+    device: "Android tablet (PWA)", notes: "", rt60_s: null,
+    siteId: genId(), phaseNo: 1, lastExternalSavedAt: null,
+  };
+}
+
+function loadSiteSlot(compositeId) {
+  try {
+    const raw = localStorage.getItem(SITE_SLOT_PREFIX + compositeId);
+    if (!raw) { showToast("データが見つかりません"); return false; }
+    const snap = JSON.parse(raw);
+    Object.assign(state, snap);
+    migrateLoadedState();
+    return true;
+  } catch (e) {
+    showToast("読み込みに失敗しました");
+    return false;
+  }
+}
+
+async function switchToSite(compositeId) {
+  const ok = await confirmDiscardIfUnsaved("切り替える");
+  if (!ok) return;
+  persistState();
+  if (loadSiteSlot(compositeId)) {
+    afterStateSwitch();
+    document.getElementById("sites-modal").classList.remove("visible");
+    showToast("現場を切り替えました");
+  }
+}
+
+async function deleteSiteSlot(compositeId) {
+  if (compositeId === currentCompositeId()) {
+    showToast("現在開いているデータは削除できません");
+    return;
+  }
+  const choice = await showConfirm({
+    title: "削除確認",
+    message: "この端末内保存データを削除しますか？（外部に保存済みのファイルには影響しません）",
+    buttons: [
+      { label: "削除する", value: "delete" },
+      { label: "キャンセル", value: "cancel", secondary: true },
+    ],
+  });
+  if (choice !== "delete") return;
+  try { localStorage.removeItem(SITE_SLOT_PREFIX + compositeId); } catch (e) { /* ignore */ }
+  saveRegistry(loadRegistry().filter(r => r.compositeId !== compositeId));
+  renderSitesList();
+}
+
+async function startBrandNewSite() {
+  const ok = await confirmDiscardIfUnsaved("新規現場を開始する");
+  if (!ok) return;
+  persistState();
+  resetStateForNewSite();
+  afterStateSwitch();
+  document.getElementById("sites-modal").classList.remove("visible");
+  showToast("新しい現場を開始しました");
+}
+
+async function startNewPhaseFromCurrent() {
+  if (state.vertices.length === 0) {
+    showToast("現在のデータがありません");
+    return;
+  }
+  const nextPhase = (state.meta.phaseNo || 1) + 1;
+  const choice = await showConfirm({
+    title: "新しいフェーズ",
+    message: `現在のデータを引き継いだ新しいフェーズ（phase ${nextPhase}）として保存します。よろしいですか？`,
+    buttons: [
+      { label: "開始する", value: "ok" },
+      { label: "キャンセル", value: "cancel", secondary: true },
+    ],
+  });
+  if (choice !== "ok") return;
+  state.meta.phaseNo = nextPhase;
+  state.meta.lastExternalSavedAt = null;
+  state.history = [];
+  persistState();
+  renderSitesList();
+  showToast(`phase ${state.meta.phaseNo} として続けます`);
+}
+
+function renderSitesList() {
+  document.getElementById("maxSlotsText").textContent = String(MAX_LOCAL_SLOTS);
+  const registry = loadRegistry().sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+  const container = document.getElementById("sitesList");
+  container.innerHTML = "";
+  if (registry.length === 0) {
+    container.innerHTML = `<div class="hint" style="padding:8px 0;">端末内の保存データはありません</div>`;
+    return;
+  }
+  const currentId = currentCompositeId();
+  for (const r of registry) {
+    const isCurrent = r.compositeId === currentId;
+    const dt = new Date(r.updatedAt);
+    const dtStr = `${dt.getMonth() + 1}/${dt.getDate()} ${String(dt.getHours()).padStart(2, "0")}:${String(dt.getMinutes()).padStart(2, "0")}`;
+    const unsaved = !r.lastExternalSavedAt || new Date(r.updatedAt) > new Date(r.lastExternalSavedAt);
+    const row = document.createElement("div");
+    row.style.cssText = "display:flex;justify-content:space-between;align-items:center;padding:8px 2px;border-bottom:1px solid var(--color-border);gap:8px;";
+    row.innerHTML = `
+      <div style="font-size:0.76rem;min-width:0;">
+        <div>${isCurrent ? "▶ " : ""}${escapeHtml(r.siteName)}　<span style="color:var(--color-text-dim);">phase ${r.phaseNo}</span></div>
+        <div style="color:var(--color-text-dim);font-size:0.66rem;">${dtStr}${unsaved ? "　⚠️未外部保存" : ""}</div>
+      </div>`;
+    const btnWrap = document.createElement("div");
+    btnWrap.style.cssText = "display:flex;gap:6px;flex-shrink:0;";
+    if (!isCurrent) {
+      const openBtn = document.createElement("button");
+      openBtn.textContent = "開く";
+      openBtn.style.cssText = "padding:5px 10px;font-size:0.72rem;flex:none;";
+      openBtn.addEventListener("click", () => switchToSite(r.compositeId));
+      btnWrap.appendChild(openBtn);
+    }
+    const delBtn = document.createElement("button");
+    delBtn.textContent = "削除";
+    delBtn.className = "secondary";
+    delBtn.style.cssText = "padding:5px 10px;font-size:0.72rem;flex:none;";
+    delBtn.addEventListener("click", () => deleteSiteSlot(r.compositeId));
+    btnWrap.appendChild(delBtn);
+    row.appendChild(btnWrap);
+    container.appendChild(row);
+  }
+}
+
+document.getElementById("sitesBtn").addEventListener("click", () => {
+  renderSitesList();
+  document.getElementById("sites-modal").classList.add("visible");
+});
+document.getElementById("closeSitesBtn").addEventListener("click", () => {
+  document.getElementById("sites-modal").classList.remove("visible");
+});
+document.getElementById("saveExternalBtn").addEventListener("click", async () => {
+  await exportInternalDataFile();
+  renderSitesList();
+});
+document.getElementById("newPhaseBtn").addEventListener("click", startNewPhaseFromCurrent);
+document.getElementById("newSiteBtn").addEventListener("click", startBrandNewSite);
+
+document.getElementById("importFileInput").addEventListener("change", async (evt) => {
+  const file = evt.target.files[0];
+  if (!file) return;
+  let snap;
+  try {
+    snap = JSON.parse(await file.text());
+  } catch (e) {
+    showToast("JSONの読み込みに失敗しました");
+    evt.target.value = "";
+    return;
+  }
+  if (!snap || !Array.isArray(snap.vertices) || !Array.isArray(snap.edges)) {
+    showToast("対応していないファイル形式です");
+    evt.target.value = "";
+    return;
+  }
+  const ok = await confirmDiscardIfUnsaved("読み込む");
+  if (!ok) { evt.target.value = ""; return; }
+  persistState();
+
+  // ③タイムスタンプによるコンフリクト検知：
+  // 読み込むファイルと同じ現場・フェーズの端末内データが、
+  // ファイルの外部保存時刻より新しく更新されている場合は警告する。
+  const importedSiteId = snap.meta && snap.meta.siteId;
+  const importedPhase = snap.meta && snap.meta.phaseNo;
+  const importedSavedAt = snap.meta && snap.meta.lastExternalSavedAt;
+  if (importedSiteId && importedPhase) {
+    const existing = loadRegistry().find(
+      r => r.siteId === importedSiteId && r.phaseNo === importedPhase
+    );
+    if (existing && importedSavedAt && new Date(existing.updatedAt) > new Date(importedSavedAt)) {
+      showToast("⚠️ 端末内に、読み込んだファイルより新しいデータがあります");
+    }
+  }
+
+  Object.assign(state, snap);
+  migrateLoadedState();
+  afterStateSwitch();
+  document.getElementById("sites-modal").classList.remove("visible");
+  showToast("ファイルを読み込みました");
+  evt.target.value = "";
+});
+
+document.getElementById("doneBtn").addEventListener("click", async () => {
   persistState();
   const all = [...state.edges, ...state.diagonals];
   const unmeasuredCount = all.filter(x => x.measurement.status !== "measured").length;
   if (unmeasuredCount > 0) {
     showToast(`未測定・要確認が ${unmeasuredCount} 件あります`);
-  } else {
-    showToast("全て測定済みです。保存しました。");
+    return;
   }
+  const choice = await showConfirm({
+    title: "保存確認",
+    message: "全て測定済みです。現場データを外部に保存しますか？",
+    buttons: [
+      { label: "保存する", value: "save" },
+      { label: "あとで", value: "later", secondary: true },
+    ],
+  });
+  if (choice === "save") await exportInternalDataFile();
 });
 
 /* ============================================================
