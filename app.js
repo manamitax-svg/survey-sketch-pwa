@@ -43,7 +43,7 @@ const state = {
 };
 
 /* ---------- バージョン ---------- */
-const APP_VERSION = "0.16.2"; // 読込ファイル入力のaccept属性を削除し、フルのファイルピッカー(Google Drive等)を表示させる
+const APP_VERSION = "0.17.0"; // Web Share Target化：Google Drive等から本PWAへ直接ファイルを共有して読込可能に
 
 /* ---------- 調整可能パラメータ（合意事項①: 感度調整） ---------- */
 const VERTEX_HIT_RADIUS = 34;        // 頂点ヒット半径(px) 26→34に拡大
@@ -2970,24 +2970,22 @@ document.getElementById("saveExternalBtn").addEventListener("click", async () =>
 document.getElementById("newPhaseBtn").addEventListener("click", startNewPhaseFromCurrent);
 document.getElementById("newSiteBtn").addEventListener("click", startBrandNewSite);
 
-document.getElementById("importFileInput").addEventListener("change", async (evt) => {
-  const file = evt.target.files[0];
-  if (!file) return;
+// 読込データの適用処理（ファイル選択・Web Share Target共通）。
+// text: ファイルの中身（JSON文字列）
+async function applyImportedSnapshot(text) {
   let snap;
   try {
-    snap = JSON.parse(await file.text());
+    snap = JSON.parse(text);
   } catch (e) {
     showToast("JSONの読み込みに失敗しました");
-    evt.target.value = "";
     return;
   }
   if (!snap || !Array.isArray(snap.vertices) || !Array.isArray(snap.edges)) {
     showToast("対応していないファイル形式です");
-    evt.target.value = "";
     return;
   }
   const ok = await confirmDiscardIfUnsaved("読み込む");
-  if (!ok) { evt.target.value = ""; return; }
+  if (!ok) return;
   persistState();
 
   // ③タイムスタンプによるコンフリクト検知：
@@ -3010,8 +3008,34 @@ document.getElementById("importFileInput").addEventListener("change", async (evt
   afterStateSwitch();
   document.getElementById("sites-modal").classList.remove("visible");
   showToast("ファイルを読み込みました");
+}
+
+document.getElementById("importFileInput").addEventListener("change", async (evt) => {
+  const file = evt.target.files[0];
+  if (!file) return;
+  await applyImportedSnapshot(await file.text());
   evt.target.value = "";
 });
+
+// Web Share Target経由の読込：Google Drive等のアプリから本PWAへ
+// 「共有」でJSONファイルを渡された場合、sw.jsが一時キャッシュに
+// 保存した上で index.html?shared=1 にリダイレクトしてくる。
+// ここでそのペイロードを取り出して読み込む。
+const SHARE_TARGET_CACHE = "survey-sketch-share-target-v1";
+async function checkShareTargetPayload() {
+  const params = new URLSearchParams(location.search);
+  if (params.get("shared") !== "1") return;
+  history.replaceState({}, "", location.pathname); // URLを綺麗にする
+  if (!("caches" in window)) return;
+  try {
+    const cache = await caches.open(SHARE_TARGET_CACHE);
+    const res = await cache.match("/__shared_payload__");
+    if (!res) return;
+    const text = await res.text();
+    await cache.delete("/__shared_payload__");
+    await applyImportedSnapshot(text);
+  } catch (e) { /* ignore */ }
+}
 
 document.getElementById("doneBtn").addEventListener("click", async () => {
   persistState();
@@ -3062,6 +3086,9 @@ function init() {
 
   // planegcs を非同期で初期化（完了前はBFSで動作）
   initPlanegcs();
+
+  // Web Share Target経由でファイルが渡されていれば読み込む
+  checkShareTargetPayload();
 }
 
 init();
