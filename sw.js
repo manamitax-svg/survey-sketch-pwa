@@ -1,4 +1,4 @@
-const CACHE_NAME = "survey-sketch-cache-v31"; // v31: manifest.jsonのorientation指定を削除（OS側の回転ロック設定に従うように修正）。前回のキャッシュ更新漏れの是正
+const CACHE_NAME = "survey-sketch-cache-v32"; // v32: 音源のポリゴン内外判定を、未確定(辺長未測定)の部屋を含む場合でも安定するよう修正
 const SHARE_TARGET_CACHE = "survey-sketch-share-target-v1"; // 共有で受け取ったファイルの一時置き場
 const ASSETS = [
   "./index.html",

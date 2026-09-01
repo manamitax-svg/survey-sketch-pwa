@@ -43,7 +43,7 @@ const state = {
 };
 
 /* ---------- バージョン ---------- */
-const APP_VERSION = "0.18.1"; // Validation機能・フッター再構成（現地データ生成の一本化）・用語の認知論的見直し（作業状態/現地データ/現場管理）
+const APP_VERSION = "0.18.0"; // Validation機能・フッター再構成（現地データ生成の一本化）・用語の認知論的見直し（作業状態/現地データ/現場管理）
 
 /* ---------- Validation（現地データ生成前の検証） ---------- */
 const VALIDATION_MIN_EDGE_LEN_M = 0.02;    // 極小辺のしきい値（これ未満は警告）
@@ -2553,34 +2553,37 @@ function checkMinimalPolygonSize() {
   return violations;
 }
 
-// 辺の隣接関係(次数2前提)から、連結成分ごとに頂点順の閉路（部屋ポリゴン）を復元する。
+// 辺の隣接関係(次数2前提)から、連結成分ごとに頂点順・辺順の閉路（部屋ポリゴン）を復元する。
 // 次数が2でない頂点を含む成分は復元不能なためスキップする
 // （その場合は一筆書きルール違反として別途blockingで報告されているはず）。
+// 各loopは {vertexIds, edges} を持ち、edgesはその閉路を構成する辺オブジェクトの配列。
 function buildOrderedLoops() {
-  const adj = {};
+  const adj = {}; // vid -> [{nid, edge}]
   for (const v of state.vertices) adj[v.id] = [];
   for (const e of state.edges) {
-    if (adj[e.from]) adj[e.from].push(e.to);
-    if (adj[e.to]) adj[e.to].push(e.from);
+    if (adj[e.from]) adj[e.from].push({ nid: e.to, edge: e });
+    if (adj[e.to]) adj[e.to].push({ nid: e.from, edge: e });
   }
   const visited = new Set();
   const loops = [];
   for (const v of state.vertices) {
     if (visited.has(v.id)) continue;
     if (!adj[v.id] || adj[v.id].length !== 2) { visited.add(v.id); continue; }
-    const loop = [];
-    let prev = null, cur = v.id;
+    const vertexIds = [];
+    const edges = [];
+    let prevEdge = null, cur = v.id;
     let safety = 0;
     while (!visited.has(cur) && safety++ < state.vertices.length + 1) {
       visited.add(cur);
-      loop.push(cur);
-      const nbrs = adj[cur] || [];
-      const next = nbrs.find(n => n !== prev);
-      prev = cur;
-      cur = next !== undefined ? next : nbrs[0];
-      if (cur === undefined) break;
+      vertexIds.push(cur);
+      const options = adj[cur] || [];
+      const nextOpt = options.find(o => o.edge !== prevEdge) || options[0];
+      if (!nextOpt) break;
+      edges.push(nextOpt.edge);
+      prevEdge = nextOpt.edge;
+      cur = nextOpt.nid;
     }
-    if (loop.length >= 3) loops.push(loop);
+    if (vertexIds.length >= 3) loops.push({ vertexIds, edges });
   }
   return loops;
 }
@@ -2600,17 +2603,30 @@ function pointInPolygon(x, y, polyPoints) {
 
 // 音源がいずれかの部屋ポリゴンの内部に配置されているかを検証。
 // トポロジーが崩れている（閉路を復元できない）場合は判定不能なためスキップする。
+//
+// 判定の有効化条件：全ての辺が測定済みの「確定した部屋」が一つも無ければ、
+// チェック自体を行わない（辺長未測定の部屋しか無い状態でこの警告を出すと、
+// GCSソルバー上で自由度が残る未確定形状に対する判定になり、無関係な操作
+// による再ソルブのたびに警告が出たり消えたりして不安定になるため）。
+//
+// 個々の音源の判定：確定・未確定を問わず「いずれかの部屋ポリゴンの内部」に
+// あれば警告しない。確定した部屋の外にあっても、まだ形状が固まっていない
+// 未確定の部屋の中に収まっていれば、それは単に「その部屋がまだ測定中」な
+// だけであり音源側の問題ではないため、確定済みの部屋だけを基準に「外」と
+// 判定してしまうと、他の部屋の測定が完了した瞬間に無関係な音源まで
+// 巻き添えで警告される、という別の不安定要因を生む。よって「確定した部屋が
+// 最低1つ存在する（＝チェックが有効な状態）」ことを条件に、実際の内外判定は
+// 確定・未確定を問わず全ポリゴンを対象に行う。
 function checkSourcesInsidePolygon() {
   const violations = [];
   if (!state.sources || state.sources.length === 0) return violations;
   const loops = buildOrderedLoops();
-  if (loops.length === 0) return violations;
-  const polygons = loops.map(loop =>
-    loop.map(vid => state.vertices.find(v => v.id === vid)).filter(Boolean)
-  ).filter(poly => poly.length >= 3);
-  if (polygons.length === 0) return violations;
+  const toPolygon = loop => loop.vertexIds.map(vid => state.vertices.find(v => v.id === vid)).filter(Boolean);
+  const allPolygons = loops.map(toPolygon).filter(poly => poly.length >= 3);
+  const hasConfirmedRoom = loops.some(loop => loop.edges.every(e => e.measurement.status === "measured"));
+  if (!hasConfirmedRoom || allPolygons.length === 0) return violations;
   for (const src of state.sources) {
-    const inAny = polygons.some(poly => pointInPolygon(src.sketchX, src.sketchY, poly));
+    const inAny = allPolygons.some(poly => pointInPolygon(src.sketchX, src.sketchY, poly));
     if (!inAny) violations.push({ sourceId: src.id, sourceName: src.name });
   }
   return violations;
