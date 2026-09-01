@@ -2553,6 +2553,69 @@ function checkMinimalPolygonSize() {
   return violations;
 }
 
+// 辺の隣接関係(次数2前提)から、連結成分ごとに頂点順の閉路（部屋ポリゴン）を復元する。
+// 次数が2でない頂点を含む成分は復元不能なためスキップする
+// （その場合は一筆書きルール違反として別途blockingで報告されているはず）。
+function buildOrderedLoops() {
+  const adj = {};
+  for (const v of state.vertices) adj[v.id] = [];
+  for (const e of state.edges) {
+    if (adj[e.from]) adj[e.from].push(e.to);
+    if (adj[e.to]) adj[e.to].push(e.from);
+  }
+  const visited = new Set();
+  const loops = [];
+  for (const v of state.vertices) {
+    if (visited.has(v.id)) continue;
+    if (!adj[v.id] || adj[v.id].length !== 2) { visited.add(v.id); continue; }
+    const loop = [];
+    let prev = null, cur = v.id;
+    let safety = 0;
+    while (!visited.has(cur) && safety++ < state.vertices.length + 1) {
+      visited.add(cur);
+      loop.push(cur);
+      const nbrs = adj[cur] || [];
+      const next = nbrs.find(n => n !== prev);
+      prev = cur;
+      cur = next !== undefined ? next : nbrs[0];
+      if (cur === undefined) break;
+    }
+    if (loop.length >= 3) loops.push(loop);
+  }
+  return loops;
+}
+
+// レイキャスティング法による点内外判定（多角形頂点は{x,y}配列）
+function pointInPolygon(x, y, polyPoints) {
+  let inside = false;
+  for (let i = 0, j = polyPoints.length - 1; i < polyPoints.length; j = i++) {
+    const xi = polyPoints[i].x, yi = polyPoints[i].y;
+    const xj = polyPoints[j].x, yj = polyPoints[j].y;
+    const intersect = ((yi > y) !== (yj > y)) &&
+      (x < (xj - xi) * (y - yi) / (yj - yi + 1e-12) + xi);
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+
+// 音源がいずれかの部屋ポリゴンの内部に配置されているかを検証。
+// トポロジーが崩れている（閉路を復元できない）場合は判定不能なためスキップする。
+function checkSourcesInsidePolygon() {
+  const violations = [];
+  if (!state.sources || state.sources.length === 0) return violations;
+  const loops = buildOrderedLoops();
+  if (loops.length === 0) return violations;
+  const polygons = loops.map(loop =>
+    loop.map(vid => state.vertices.find(v => v.id === vid)).filter(Boolean)
+  ).filter(poly => poly.length >= 3);
+  if (polygons.length === 0) return violations;
+  for (const src of state.sources) {
+    const inAny = polygons.some(poly => pointInPolygon(src.sketchX, src.sketchY, poly));
+    if (!inAny) violations.push({ sourceId: src.id, sourceName: src.name });
+  }
+  return violations;
+}
+
 // 現地データ生成前の統合検証。{blocking, warnings, info} を返す。
 // blocking が1件でもあれば生成をブロックする。
 function computeValidation() {
@@ -2620,6 +2683,14 @@ function computeValidation() {
   }
   if (!state.sources || state.sources.length === 0) {
     warnings.push({ code: "no_sources", target: null, message: "音源が1件も設定されていません" });
+  } else if (blocking.length === 0) {
+    // トポロジーが正常な場合のみ、音源のポリゴン内外を判定する
+    for (const it of checkSourcesInsidePolygon()) {
+      warnings.push({
+        code: "source_outside_polygon", target: it.sourceId,
+        message: `音源 ${it.sourceName} がいずれの部屋ポリゴンの内部にもありません`,
+      });
+    }
   }
   const degenerate = checkDegenerateGeometry();
   for (const s of degenerate.shortEdges) {
@@ -2679,6 +2750,9 @@ function renderValidationRow(container, item) {
       const v1 = state.vertices.find(v => v.id === e.from), v2 = state.vertices.find(v => v.id === e.to);
       if (v1 && v2) jumpTarget = { x: (v1.x + v2.x) / 2, y: (v1.y + v2.y) / 2 };
     }
+  } else if (item.target && /^S/.test(item.target)) {
+    const s = state.sources.find(ss => ss.id === item.target);
+    if (s) jumpTarget = { x: s.sketchX, y: s.sketchY };
   }
   if (jumpTarget) {
     row.classList.add("jumpable");

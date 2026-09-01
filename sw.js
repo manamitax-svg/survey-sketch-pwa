@@ -1,4 +1,4 @@
-const CACHE_NAME = "survey-sketch-cache-v30"; // v30: Validation機能・フッター再構成・用語の認知論的見直し（作業状態/現地データ/現場管理）
+const CACHE_NAME = "survey-sketch-cache-v31"; // v31: manifest.jsonのorientation指定を削除（OS側の回転ロック設定に従うように修正）。前回のキャッシュ更新漏れの是正
 const SHARE_TARGET_CACHE = "survey-sketch-share-target-v1"; // 共有で受け取ったファイルの一時置き場
 const ASSETS = [
   "./index.html",
