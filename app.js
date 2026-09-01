@@ -43,7 +43,13 @@ const state = {
 };
 
 /* ---------- バージョン ---------- */
-const APP_VERSION = "0.17.0"; // Web Share Target化：Google Drive等から本PWAへ直接ファイルを共有して読込可能に
+const APP_VERSION = "0.18.0"; // Validation機能・フッター再構成（現地データ生成の一本化）・用語の認知論的見直し（作業状態/現地データ/現場管理）
+
+/* ---------- Validation（現地データ生成前の検証） ---------- */
+const VALIDATION_MIN_EDGE_LEN_M = 0.02;    // 極小辺のしきい値（これ未満は警告）
+const VALIDATION_SHARP_ANGLE_DEG = 5;      // 極小角度・鋭角側のしきい値
+const VALIDATION_STRAIGHT_ANGLE_DEG = 175; // 極小角度・直線側のしきい値
+let _lastValidation = null; // 直近のcomputeValidation()結果（Validationバーのタップ時に再利用）
 
 /* ---------- 調整可能パラメータ（合意事項①: 感度調整） ---------- */
 const VERTEX_HIT_RADIUS = 34;        // 頂点ヒット半径(px) 26→34に拡大
@@ -2385,7 +2391,270 @@ function updateStats() {
 
   // --- リアルタイム異常検出 ---
   updateAnomalyWarnings();
+  // --- Validationサマリー更新（現地データ生成可否の目安） ---
+  updateValidationBar();
 }
+
+/* ============================================================
+   Validation（現地データ生成前の検証）
+   ============================================================ */
+
+// 一筆書きルール（頂点の辺接続数=2）違反を検出。diagonalsは対象外。
+function checkOneStrokeRule() {
+  const degree = {};
+  for (const v of state.vertices) degree[v.id] = 0;
+  for (const e of state.edges) {
+    if (degree[e.from] !== undefined) degree[e.from]++;
+    if (degree[e.to] !== undefined) degree[e.to]++;
+  }
+  const violations = [];
+  for (const v of state.vertices) {
+    const d = degree[v.id] || 0;
+    if (d !== 2) violations.push({ vertexId: v.id, degree: d });
+  }
+  return violations;
+}
+
+// 線分p1-p2とp3-p4が「端点共有ではなく」実際に交差するかを方向判定で確認
+function segmentsProperlyIntersect(p1, p2, p3, p4) {
+  function orient(a, b, c) {
+    const val = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+    if (Math.abs(val) < 1e-9) return 0;
+    return val > 0 ? 1 : -1;
+  }
+  const d1 = orient(p3, p4, p1);
+  const d2 = orient(p3, p4, p2);
+  const d3 = orient(p1, p2, p3);
+  const d4 = orient(p1, p2, p4);
+  return ((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) &&
+         ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0));
+}
+
+// 辺同士の自己交差を検出。連結成分（部屋ポリゴン）をまたぐペアも対象に含める。
+// 端点を共有する辺（同一多角形の隣接辺・意図的に頂点が一致する部屋境界）は除外。
+function checkSelfIntersection() {
+  const edges = state.edges;
+  const violations = [];
+  for (let i = 0; i < edges.length; i++) {
+    const ea = edges[i];
+    const va1 = state.vertices.find(v => v.id === ea.from);
+    const va2 = state.vertices.find(v => v.id === ea.to);
+    if (!va1 || !va2) continue;
+    for (let j = i + 1; j < edges.length; j++) {
+      const eb = edges[j];
+      if (ea.from === eb.from || ea.from === eb.to ||
+          ea.to === eb.from || ea.to === eb.to) continue;
+      const vb1 = state.vertices.find(v => v.id === eb.from);
+      const vb2 = state.vertices.find(v => v.id === eb.to);
+      if (!vb1 || !vb2) continue;
+      if (segmentsProperlyIntersect(va1, va2, vb1, vb2)) {
+        violations.push({ edgeA: ea.id, edgeB: eb.id });
+      }
+    }
+  }
+  return violations;
+}
+
+// 極小辺長・極小角度（頂点の内角が0°/180°付近）を検出。スケール未校正時は評価しない
+// （その場合は#1のスケール未校正が先に報告されるため）。
+function checkDegenerateGeometry() {
+  const shortEdges = [];
+  const sharpAngles = [];
+  if (!state.scalePxPerMeter) return { shortEdges, sharpAngles };
+
+  for (const e of state.edges) {
+    const v1 = state.vertices.find(v => v.id === e.from);
+    const v2 = state.vertices.find(v => v.id === e.to);
+    if (!v1 || !v2) continue;
+    const pxLen = Math.hypot(v2.x - v1.x, v2.y - v1.y);
+    const lenM = pxLen / state.scalePxPerMeter;
+    if (lenM < VALIDATION_MIN_EDGE_LEN_M) {
+      shortEdges.push({ edgeId: e.id, lengthM: lenM });
+    }
+  }
+
+  const neighborsOf = {};
+  for (const e of state.edges) {
+    (neighborsOf[e.from] = neighborsOf[e.from] || []).push(e.to);
+    (neighborsOf[e.to] = neighborsOf[e.to] || []).push(e.from);
+  }
+  for (const v of state.vertices) {
+    const nb = neighborsOf[v.id];
+    if (!nb || nb.length !== 2) continue; // 次数≠2はcheckOneStrokeRule側で報告済み
+    const a = state.vertices.find(vv => vv.id === nb[0]);
+    const b = state.vertices.find(vv => vv.id === nb[1]);
+    if (!a || !b) continue;
+    const v1x = a.x - v.x, v1y = a.y - v.y;
+    const v2x = b.x - v.x, v2y = b.y - v.y;
+    const len1 = Math.hypot(v1x, v1y), len2 = Math.hypot(v2x, v2y);
+    if (len1 === 0 || len2 === 0) continue;
+    let cosT = (v1x * v2x + v1y * v2y) / (len1 * len2);
+    cosT = Math.max(-1, Math.min(1, cosT));
+    const deg = Math.acos(cosT) * 180 / Math.PI;
+    if (deg < VALIDATION_SHARP_ANGLE_DEG || deg > VALIDATION_STRAIGHT_ANGLE_DEG) {
+      sharpAngles.push({ vertexId: v.id, angleDeg: deg });
+    }
+  }
+  return { shortEdges, sharpAngles };
+}
+
+// 現地データ生成前の統合検証。{blocking, warnings, info} を返す。
+// blocking が1件でもあれば生成をブロックする。
+function computeValidation() {
+  const blocking = [];
+  const warnings = [];
+  const info = [];
+
+  if (!state.scalePxPerMeter) {
+    blocking.push({ code: "scale_uncalibrated", target: null, message: "スケールが未校正です" });
+  }
+  if (state.vertices.length === 0) {
+    blocking.push({ code: "no_vertices", target: null, message: "形状が作成されていません" });
+  }
+  for (const e of state.edges) {
+    if (e.from === e.to) {
+      blocking.push({ code: "self_loop_edge", target: e.id, message: `自己ループ辺 ${e.id} があります` });
+    }
+  }
+  for (const v of state.vertices) {
+    const connected = state.edges.some(e => e.from === v.id || e.to === v.id)
+                   || state.diagonals.some(d => d.from === v.id || d.to === v.id);
+    if (!connected) {
+      blocking.push({ code: "isolated_vertex", target: v.id, message: `孤立頂点 ${v.id} があります` });
+    }
+  }
+  if (state.vertices.length > 0) {
+    for (const viol of checkOneStrokeRule()) {
+      blocking.push({
+        code: "one_stroke_violation", target: viol.vertexId,
+        message: `頂点 ${viol.vertexId} の辺接続数が ${viol.degree} 本です（2本である必要があります）`,
+      });
+    }
+  }
+  for (const it of checkSelfIntersection()) {
+    blocking.push({
+      code: "self_intersection", target: it.edgeA,
+      message: `辺 ${it.edgeA} と 辺 ${it.edgeB} が交差しています`,
+    });
+  }
+
+  for (const item of [...state.edges, ...state.diagonals]) {
+    if (item.measurement.status === "unmeasured") {
+      warnings.push({ code: "edge_unmeasured", target: item.id, message: `${item.id} が未測定です` });
+    } else if (item.measurement.status === "invalidated") {
+      warnings.push({ code: "edge_invalidated", target: item.id, message: `${item.id} が要再確認です` });
+    }
+  }
+  for (const v of state.vertices) {
+    const h = state.heights[v.id];
+    if (!h || h.status !== "measured") {
+      warnings.push({ code: "height_unmeasured", target: v.id, message: `頂点 ${v.id} の高さが未測定です` });
+    }
+  }
+  if (!state.sources || state.sources.length === 0) {
+    warnings.push({ code: "no_sources", target: null, message: "音源が1件も設定されていません" });
+  }
+  const degenerate = checkDegenerateGeometry();
+  for (const s of degenerate.shortEdges) {
+    warnings.push({
+      code: "edge_too_short", target: s.edgeId,
+      message: `辺 ${s.edgeId} の長さが ${s.lengthM.toFixed(3)}m と極端に短くなっています`,
+    });
+  }
+  for (const s of degenerate.sharpAngles) {
+    warnings.push({
+      code: "angle_degenerate", target: s.vertexId,
+      message: `頂点 ${s.vertexId} の内角が ${s.angleDeg.toFixed(1)}° と極端です`,
+    });
+  }
+
+  if (!state.meta.site_name || !state.meta.surveyor || !state.meta.survey_date) {
+    info.push({ code: "meta_incomplete", target: null, message: "現場情報が未入力です" });
+  }
+  if (state.meta.rt60_s == null) {
+    info.push({ code: "rt60_unmeasured", target: null, message: "RT60が未測定です（任意項目）" });
+  }
+
+  return { blocking, warnings, info };
+}
+
+// フッターのValidationサマリー表示を更新
+function updateValidationBar() {
+  const validation = computeValidation();
+  _lastValidation = validation;
+  const bar = document.getElementById("validationBar");
+  const text = document.getElementById("validationBarText");
+  if (validation.blocking.length > 0) {
+    bar.dataset.grade = "block";
+    text.textContent = `🛑 送信不可（要対応 ${validation.blocking.length}件）`;
+  } else if (validation.warnings.length > 0) {
+    bar.dataset.grade = "warn";
+    text.textContent = `⚠️ 警告 ${validation.warnings.length}件`;
+  } else {
+    bar.dataset.grade = "ok";
+    text.textContent = `✅ 検証OK（すべて完了）`;
+  }
+  return validation;
+}
+
+// 該当箇所へジャンプ可能な行を1件描画する共通ヘルパー
+function renderValidationRow(container, item) {
+  const row = document.createElement("div");
+  row.className = "validation-detail-row";
+  row.textContent = item.message;
+  let jumpTarget = null;
+  if (item.target && /^P/.test(item.target)) {
+    const v = state.vertices.find(vv => vv.id === item.target);
+    if (v) jumpTarget = { x: v.x, y: v.y };
+  } else if (item.target && /^E/.test(item.target)) {
+    const e = state.edges.find(ee => ee.id === item.target);
+    if (e) {
+      const v1 = state.vertices.find(v => v.id === e.from), v2 = state.vertices.find(v => v.id === e.to);
+      if (v1 && v2) jumpTarget = { x: (v1.x + v2.x) / 2, y: (v1.y + v2.y) / 2 };
+    }
+  }
+  if (jumpTarget) {
+    row.classList.add("jumpable");
+    row.title = "タップで移動";
+    row.addEventListener("click", () => {
+      document.getElementById("validation-modal").classList.remove("visible");
+      jumpToSketchPos(jumpTarget.x, jumpTarget.y);
+    });
+  }
+  container.appendChild(row);
+}
+
+// 検証結果モーダルを開く。blockedOnly=trueの場合はinfoセクションを省略する
+function openValidationModal(validation, opts = {}) {
+  const list = document.getElementById("validationDetailList");
+  list.innerHTML = "";
+  const sections = [
+    { items: validation.blocking, label: "🛑 対応が必要です" },
+    { items: validation.warnings, label: "⚠️ 警告" },
+  ];
+  if (!opts.blockedOnly) sections.push({ items: validation.info, label: "ℹ️ 情報" });
+  let any = false;
+  for (const sec of sections) {
+    if (sec.items.length === 0) continue;
+    any = true;
+    const h = document.createElement("div");
+    h.className = "validation-section-label";
+    h.textContent = sec.label;
+    list.appendChild(h);
+    for (const item of sec.items) renderValidationRow(list, item);
+  }
+  if (!any) {
+    list.innerHTML = `<div class="hint" style="padding:8px 0;">検証項目はすべて問題ありません。</div>`;
+  }
+  document.getElementById("validation-modal").classList.add("visible");
+}
+
+document.getElementById("validationBar").addEventListener("click", () => {
+  openValidationModal(_lastValidation || computeValidation());
+});
+document.getElementById("closeValidationBtn").addEventListener("click", () => {
+  document.getElementById("validation-modal").classList.remove("visible");
+});
 
 function updateAnomalyWarnings() {
   const warnings = [];
@@ -2616,6 +2885,48 @@ function toYaml() {
   }
   L.push("");
 
+  // validation セクション：生成時点でのPWA側検証結果（解析側への申し送り事項）
+  const validation = computeValidation();
+  L.push("validation:");
+  L.push(`  generated_at: ${yamlEscapeStr(new Date().toISOString())}`);
+  if (validation.blocking.length === 0) {
+    L.push("  blocking_issues: []"); // 生成できた時点で常に空（ブロック要因があれば生成自体に到達しない）
+  } else {
+    L.push("  blocking_issues:");
+    for (const b of validation.blocking) {
+      L.push(`    - code: ${yamlEscapeStr(b.code)}`);
+      L.push(`      target: ${b.target ? yamlEscapeStr(b.target) : "null"}`);
+      L.push(`      message: ${yamlEscapeStr(b.message)}`);
+    }
+  }
+  if (validation.warnings.length === 0) {
+    L.push("  warnings: []");
+  } else {
+    L.push("  warnings:");
+    for (const w of validation.warnings) {
+      L.push(`    - code: ${yamlEscapeStr(w.code)}`);
+      L.push(`      target: ${w.target ? yamlEscapeStr(w.target) : "null"}`);
+      L.push(`      message: ${yamlEscapeStr(w.message)}`);
+    }
+  }
+  {
+    const edgesTotal = state.edges.length;
+    const edgesMeasured = state.edges.filter(e => e.measurement.status === "measured").length;
+    const edgesUnmeasured = state.edges.filter(e => e.measurement.status === "unmeasured").length;
+    const edgesInvalidated = state.edges.filter(e => e.measurement.status === "invalidated").length;
+    const heightsTotal = state.vertices.length;
+    const heightsMeasured = state.vertices.filter(v => state.heights[v.id] && state.heights[v.id].status === "measured").length;
+    L.push("  summary:");
+    L.push(`    edges_total: ${edgesTotal}`);
+    L.push(`    edges_measured: ${edgesMeasured}`);
+    L.push(`    edges_unmeasured: ${edgesUnmeasured}`);
+    L.push(`    edges_invalidated: ${edgesInvalidated}`);
+    L.push(`    heights_total: ${heightsTotal}`);
+    L.push(`    heights_measured: ${heightsMeasured}`);
+    L.push(`    sources_count: ${state.sources ? state.sources.length : 0}`);
+  }
+  L.push("");
+
   const allMeasured = [...state.edges, ...state.diagonals].every(x => x.measurement.status === "measured");
   L.push("processing_status:");
   L.push(`  topology_locked: false`);
@@ -2627,22 +2938,37 @@ function toYaml() {
   return L.join("\n");
 }
 
-document.getElementById("exportBtn").addEventListener("click", () => {
-  document.getElementById("outputPre").textContent = toYaml();
-  document.getElementById("output-modal").classList.add("visible");
-});
-
-// YAML出力ファイル名用の日時サフィックス（現地時刻 YYYYMMDD_HHmm）。
-// 同じ現場名で複数回出力しても上書きされず、後段側からも
-// どの時点のデータかが判別できるようにする。
+// timestampSuffix() は下記YAML/JSONファイル名生成で共通使用
 function timestampSuffix() {
   const d = new Date();
   const pad = (n) => String(n).padStart(2, "0");
   return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}`;
 }
 
-document.getElementById("shareBtn").addEventListener("click", async () => {
-  const yaml = toYaml();
+// 現地データ生成の入口。Validationでブロック要因があれば検証結果のみ表示し、
+// プレビュー（output-modal）は開かない。ブロックが無ければ、警告があっても
+// バナー表示のうえプレビューを開く（送信するかはユーザー判断）。
+document.getElementById("doneBtn").addEventListener("click", () => {
+  persistState();
+  const validation = updateValidationBar();
+  if (validation.blocking.length > 0) {
+    openValidationModal(validation, { blockedOnly: true });
+    return;
+  }
+  document.getElementById("outputPre").textContent = toYaml();
+  const banner = document.getElementById("outputWarningBanner");
+  if (validation.warnings.length > 0) {
+    banner.style.display = "block";
+    banner.innerHTML = `⚠️ 警告 ${validation.warnings.length}件があります。内容を確認のうえ送信してください。<br>` +
+      validation.warnings.map(w => `・${escapeHtml(w.message)}`).join("<br>");
+  } else {
+    banner.style.display = "none";
+  }
+  document.getElementById("output-modal").classList.add("visible");
+});
+
+document.getElementById("sendOutputBtn").addEventListener("click", async () => {
+  const yaml = document.getElementById("outputPre").textContent;
   const safeName = (state.meta.site_name || "survey_record").replace(/[^\w\-]/g, "_");
   // .yaml は Android の共有先アプリに認識されにくいため .txt で共有
   // （内容はYAML形式のまま。Google Drive等で受け取り後に .yaml にリネーム可能）
@@ -2653,6 +2979,7 @@ document.getElementById("shareBtn").addEventListener("click", async () => {
     if (navigator.canShare({ files: [file] })) {
       try {
         await navigator.share({ title: fileName, files: [file] });
+        document.getElementById("output-modal").classList.remove("visible");
         return;
       } catch (e) {
         if (e.name === "AbortError") return;
@@ -2660,18 +2987,19 @@ document.getElementById("shareBtn").addEventListener("click", async () => {
     }
   }
 
-  // テキストとして共有
+  // テキストとして送信
   if (navigator.share) {
     try {
       await navigator.share({ title: fileName, text: yaml });
+      document.getElementById("output-modal").classList.remove("visible");
       return;
     } catch (e) {
       if (e.name === "AbortError") return;
     }
   }
 
-  // フォールバック: ダウンロード
-  showToast("共有非対応のブラウザです。ダウンロードします。");
+  // フォールバック: 端末への保存（送信ではなく内側に留まる操作）
+  showToast("送信に対応していない環境です。端末に保存します。");
   const blob = new Blob([yaml], { type: "text/plain" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
@@ -2699,7 +3027,7 @@ document.getElementById("downloadOutputBtn").addEventListener("click", () => {
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
-  showToast("ファイルを保存しました");
+  showToast("現地データを端末に保存しました");
 });
 
 /* ============================================================
@@ -2768,8 +3096,8 @@ async function exportInternalDataFile() {
     }
   }
 
-  // フォールバック: ダウンロード
-  showToast("共有非対応のブラウザです。ダウンロードします。");
+  // フォールバック: 端末への保存（退避先が外部ではなく内側に留まる）
+  showToast("退避に対応していない環境です。端末に保存します。");
   const blob = new Blob([json], { type: "application/json" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
@@ -2777,7 +3105,7 @@ async function exportInternalDataFile() {
   document.body.appendChild(a); a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
-  showToast("現場データを保存しました");
+  showToast("作業状態を端末に保存しました");
 }
 
 // 現在のスケッチ・ビュー表示をstateの内容に合わせて更新する
@@ -2800,16 +3128,16 @@ function afterStateSwitch() {
   persistState();
 }
 
-// 現在の現場データが外部未保存なら、先に保存するかどうかを確認する。
+// 現在の作業状態が外部未退避なら、先に退避するかどうかを確認する。
 // 戻り値: 続行してよければ true、キャンセルなら false。
 async function confirmDiscardIfUnsaved(actionLabel) {
   if (!isCurrentSiteUnsavedExternally()) return true;
   const choice = await showConfirm({
     title: "確認",
-    message: `現在の現場データは外部保存されていません。${actionLabel}前に保存しますか？`,
+    message: `現在の作業状態は外部へ退避されていません。${actionLabel}前に退避しますか？`,
     buttons: [
-      { label: "保存してから続ける", value: "save" },
-      { label: "保存せず続ける", value: "discard" },
+      { label: "退避してから続ける", value: "save" },
+      { label: "退避せず続ける", value: "discard" },
       { label: "キャンセル", value: "cancel", secondary: true },
     ],
   });
@@ -2846,7 +3174,7 @@ function loadSiteSlot(compositeId) {
     migrateLoadedState();
     return true;
   } catch (e) {
-    showToast("読み込みに失敗しました");
+    showToast("作業状態の復元に失敗しました");
     return false;
   }
 }
@@ -2864,12 +3192,12 @@ async function switchToSite(compositeId) {
 
 async function deleteSiteSlot(compositeId) {
   if (compositeId === currentCompositeId()) {
-    showToast("現在開いているデータは削除できません");
+    showToast("現在開いている作業状態は削除できません");
     return;
   }
   const choice = await showConfirm({
     title: "削除確認",
-    message: "この端末内保存データを削除しますか？（外部に保存済みのファイルには影響しません）",
+    message: "端末内に退避されたこの作業状態を削除しますか？（外部へ退避済みのファイルには影響しません）",
     buttons: [
       { label: "削除する", value: "delete" },
       { label: "キャンセル", value: "cancel", secondary: true },
@@ -2920,7 +3248,7 @@ function renderSitesList() {
   const container = document.getElementById("sitesList");
   container.innerHTML = "";
   if (registry.length === 0) {
-    container.innerHTML = `<div class="hint" style="padding:8px 0;">端末内の保存データはありません</div>`;
+    container.innerHTML = `<div class="hint" style="padding:8px 0;">端末内に退避された作業状態はありません</div>`;
     return;
   }
   const currentId = currentCompositeId();
@@ -2934,13 +3262,13 @@ function renderSitesList() {
     row.innerHTML = `
       <div style="font-size:0.76rem;min-width:0;">
         <div>${isCurrent ? "▶ " : ""}${escapeHtml(r.siteName)}　<span style="color:var(--color-text-dim);">phase ${r.phaseNo}</span></div>
-        <div style="color:var(--color-text-dim);font-size:0.66rem;">${dtStr}${unsaved ? "　⚠️未外部保存" : ""}</div>
+        <div style="color:var(--color-text-dim);font-size:0.66rem;">${dtStr}${unsaved ? "　⚠️未退避" : ""}</div>
       </div>`;
     const btnWrap = document.createElement("div");
     btnWrap.style.cssText = "display:flex;gap:6px;flex-shrink:0;";
     if (!isCurrent) {
       const openBtn = document.createElement("button");
-      openBtn.textContent = "開く";
+      openBtn.textContent = "復元";
       openBtn.style.cssText = "padding:5px 10px;font-size:0.72rem;flex:none;";
       openBtn.addEventListener("click", () => switchToSite(r.compositeId));
       btnWrap.appendChild(openBtn);
@@ -2977,20 +3305,20 @@ async function applyImportedSnapshot(text) {
   try {
     snap = JSON.parse(text);
   } catch (e) {
-    showToast("JSONの読み込みに失敗しました");
+    showToast("作業状態の復元に失敗しました（JSON形式ではありません）");
     return;
   }
   if (!snap || !Array.isArray(snap.vertices) || !Array.isArray(snap.edges)) {
-    showToast("対応していないファイル形式です");
+    showToast("作業状態として復元できないファイルです");
     return;
   }
-  const ok = await confirmDiscardIfUnsaved("読み込む");
+  const ok = await confirmDiscardIfUnsaved("復元する");
   if (!ok) return;
   persistState();
 
   // ③タイムスタンプによるコンフリクト検知：
-  // 読み込むファイルと同じ現場・フェーズの端末内データが、
-  // ファイルの外部保存時刻より新しく更新されている場合は警告する。
+  // 復元するファイルと同じ現場・フェーズの端末内データが、
+  // ファイルの外部退避時刻より新しく更新されている場合は警告する。
   const importedSiteId = snap.meta && snap.meta.siteId;
   const importedPhase = snap.meta && snap.meta.phaseNo;
   const importedSavedAt = snap.meta && snap.meta.lastExternalSavedAt;
@@ -2999,7 +3327,7 @@ async function applyImportedSnapshot(text) {
       r => r.siteId === importedSiteId && r.phaseNo === importedPhase
     );
     if (existing && importedSavedAt && new Date(existing.updatedAt) > new Date(importedSavedAt)) {
-      showToast("⚠️ 端末内に、読み込んだファイルより新しいデータがあります");
+      showToast("⚠️ 端末内に、復元したファイルより新しい作業状態があります");
     }
   }
 
@@ -3007,7 +3335,7 @@ async function applyImportedSnapshot(text) {
   migrateLoadedState();
   afterStateSwitch();
   document.getElementById("sites-modal").classList.remove("visible");
-  showToast("ファイルを読み込みました");
+  showToast("作業状態を復元しました");
 }
 
 document.getElementById("importFileInput").addEventListener("change", async (evt) => {
@@ -3037,24 +3365,10 @@ async function checkShareTargetPayload() {
   } catch (e) { /* ignore */ }
 }
 
-document.getElementById("doneBtn").addEventListener("click", async () => {
-  persistState();
-  const all = [...state.edges, ...state.diagonals];
-  const unmeasuredCount = all.filter(x => x.measurement.status !== "measured").length;
-  if (unmeasuredCount > 0) {
-    showToast(`未測定・要確認が ${unmeasuredCount} 件あります`);
-    return;
-  }
-  const choice = await showConfirm({
-    title: "保存確認",
-    message: "全て測定済みです。現場データを外部に保存しますか？",
-    buttons: [
-      { label: "保存する", value: "save" },
-      { label: "あとで", value: "later", secondary: true },
-    ],
-  });
-  if (choice === "save") await exportInternalDataFile();
-});
+// 旧: doneBtnの「測定完了→作業状態の外部退避を促す」フローはここにあったが、
+// 現場管理画面(saveExternalBtn)・現場切替時の自動確認(confirmDiscardIfUnsaved)
+// で既に作業状態の退避は担保されているため撤去。doneBtnは現地データ生成の
+// 入口に専念する（フローは上部の doneBtn ハンドラを参照）。
 
 /* ============================================================
    ビューリセット
@@ -3082,7 +3396,7 @@ function init() {
   }
   resizeCanvas();
   updateStats();
-  if (restored) showToast("前回のデータを復元しました");
+  if (restored) showToast("前回の作業状態を復元しました");
 
   // planegcs を非同期で初期化（完了前はBFSで動作）
   initPlanegcs();

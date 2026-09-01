@@ -1,4 +1,4 @@
-const CACHE_NAME = "survey-sketch-cache-v29"; // v29: index.html/app.jsをタイムアウト付きNetwork Firstに変更
+const CACHE_NAME = "survey-sketch-cache-v30"; // v30: Validation機能・フッター再構成・用語の認知論的見直し（作業状態/現地データ/現場管理）
 const SHARE_TARGET_CACHE = "survey-sketch-share-target-v1"; // 共有で受け取ったファイルの一時置き場
 const ASSETS = [
   "./index.html",

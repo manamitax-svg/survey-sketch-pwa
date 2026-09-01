@@ -177,9 +177,13 @@
   }
 
   footer {
-    display: flex; gap: 8px; padding: 8px 10px;
+    display: flex; flex-direction: column; gap: 0; padding: 0;
     background: var(--color-surface); border-top: 1px solid var(--color-border);
-    flex-shrink: 0; padding-bottom: max(8px, env(safe-area-inset-bottom));
+    flex-shrink: 0;
+  }
+  footer .footer-actions {
+    display: flex; gap: 8px; padding: 8px 10px;
+    padding-bottom: max(8px, env(safe-area-inset-bottom));
   }
   footer button {
     flex: 1; padding: 11px; font-size: 0.8rem; font-weight: 700;
@@ -188,6 +192,22 @@
   }
   footer button.primary { background: var(--color-accent); border-color: var(--color-accent); color: white; }
   footer button:active { opacity: 0.7; }
+
+  .validation-bar {
+    padding: 8px 12px; font-size: 0.76rem; font-weight: 700;
+    text-align: center; cursor: pointer; border-bottom: 1px solid var(--color-border);
+  }
+  .validation-bar:active { opacity: 0.8; }
+  .validation-bar[data-grade="block"] { background: #3A1A1A; color: #FCA5A5; }
+  .validation-bar[data-grade="warn"]  { background: #3A3010; color: #FBBF24; }
+  .validation-bar[data-grade="ok"]    { background: #16332A; color: #6EE7B7; }
+  .validation-detail-row {
+    padding: 8px 10px; margin-bottom: 5px; font-size: 0.76rem; line-height: 1.4;
+    background: var(--color-surface-2); border: 1px solid var(--color-border); border-radius: 7px;
+  }
+  .validation-detail-row.jumpable { cursor: pointer; }
+  .validation-detail-row.jumpable:active { opacity: 0.7; }
+  .validation-section-label { font-weight: 700; font-size: 0.76rem; margin: 10px 0 4px; }
 
   /* --- モーダル共通 --- */
   .modal-overlay {
@@ -313,7 +333,7 @@
     <div class="header-right">
       <span id="versionBadge" style="font-size:0.6rem;color:var(--color-text-dim);letter-spacing:0.03em;"></span>
       <span id="modeBadge" class="mode-badge mode-draw">DRAW</span>
-      <button class="icon-btn" id="sitesBtn" title="現場データ">📁</button>
+      <button class="icon-btn" id="sitesBtn" title="現場管理">📁</button>
       <button class="icon-btn" id="metaBtn" title="現場情報">ℹ️</button>
     </div>
   </header>
@@ -417,9 +437,12 @@
   </div>
 
   <footer>
-    <button id="exportBtn">📤 YAML出力</button>
-    <button id="shareBtn">📨 共有</button>
-    <button class="primary" id="doneBtn">✅ 保存して完了</button>
+    <div class="validation-bar" id="validationBar" data-grade="ok">
+      <span id="validationBarText">検証中…</span>
+    </div>
+    <div class="footer-actions">
+      <button class="primary" id="doneBtn">✅ 測定完了 / 送信</button>
+    </div>
   </footer>
 
 </div>
@@ -442,15 +465,30 @@
   </div>
 </div>
 
-<!-- 出力モーダル -->
+<!-- 出力モーダル（現地データプレビュー） -->
 <div class="modal-overlay" id="output-modal">
   <div class="modal-box">
-    <h2>出力データ（survey_record.yaml）</h2>
+    <h2>現地データ（survey_record.yaml）</h2>
+    <div id="outputWarningBanner" class="prev-value-box" style="display:none;border-color:var(--color-invalidated);font-size:0.72rem;line-height:1.5;"></div>
     <pre id="outputPre"></pre>
     <div class="actions">
-      <button id="downloadOutputBtn">💾 ファイル保存</button>
-      <button id="copyOutputBtn">📋 コピー</button>
-      <button class="secondary" id="closeOutputBtn">閉じる</button>
+      <button id="sendOutputBtn">📨 送信</button>
+      <button class="secondary" id="downloadOutputBtn">💾 端末に保存</button>
+    </div>
+    <div class="actions">
+      <button class="secondary" id="copyOutputBtn">📋 コピー</button>
+      <button class="secondary" id="closeOutputBtn">キャンセル</button>
+    </div>
+  </div>
+</div>
+
+<!-- 検証結果モーダル -->
+<div class="modal-overlay" id="validation-modal">
+  <div class="modal-box">
+    <h2>検証結果</h2>
+    <div id="validationDetailList" style="overflow-y:auto;flex:1;"></div>
+    <div class="actions">
+      <button class="secondary" id="closeValidationBtn">閉じる</button>
     </div>
   </div>
 </div>
@@ -491,12 +529,12 @@
   </div>
 </div>
 
-<!-- 現場データ管理モーダル -->
+<!-- 現場管理モーダル -->
 <div class="modal-overlay" id="sites-modal">
   <div class="modal-box">
-    <h2>現場データ</h2>
+    <h2>現場管理</h2>
     <div class="form-row" style="margin-bottom:8px;">
-      <button id="saveExternalBtn">💾 この現場データを外部保存</button>
+      <button id="saveExternalBtn">🗄 作業状態を外部へ退避</button>
     </div>
     <div class="form-row" style="margin-bottom:8px;">
       <button id="newPhaseBtn" class="secondary">🌱 新しいフェーズとして続ける</button>
@@ -504,11 +542,14 @@
     <div class="form-row" style="margin-bottom:8px;">
       <button id="newSiteBtn" class="secondary">＋ 新規現場を開始</button>
     </div>
+    <div class="panel-title" style="margin-top:4px;">作業状態を復元（.json.txt / .json）</div>
+    <div class="hint" style="padding:6px 0;font-size:0.68rem;line-height:1.5;">
+      💡 Google Driveのファイルから復元する場合は、アプリ内の「ファイルを選択」ではなく、Driveアプリ側でファイルを長押し→「コピーを送信」→本アプリを選択してください（Drive内のファイルは「ファイルを選択」に表示されないことがあります）。
+    </div>
     <div class="form-row" style="margin-bottom:4px;">
-      <label style="flex:0 0 auto;">読込</label>
       <input type="file" id="importFileInput" style="flex:1;min-width:0;">
     </div>
-    <div class="panel-title" style="margin-top:12px;">端末内の保存データ（最大<span id="maxSlotsText"></span>件）</div>
+    <div class="panel-title" style="margin-top:12px;">端末内に退避された作業状態（最大<span id="maxSlotsText"></span>件）</div>
     <div id="sitesList" style="max-height:34vh;overflow-y:auto;"></div>
     <div class="actions">
       <button class="secondary" id="closeSitesBtn">閉じる</button>
