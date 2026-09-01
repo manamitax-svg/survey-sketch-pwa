@@ -1712,6 +1712,7 @@ canvas.addEventListener("pointerdown", (evt) => {
         state.diagonals.push(d);
         state.diagonalFirstVertex = null;
         persistState();
+        updateStats();
         showToast(`対角線 ${d.id} を作成しました`);
         render();
       }
@@ -2057,6 +2058,7 @@ function renderHeightForm() {
         // 空欄にした場合は未測定に戻す
         state.heights[vid] = { status: "unmeasured", height_m: null };
         persistState();
+        updateStats();
         renderHeightForm();
         return;
       }
@@ -2064,6 +2066,7 @@ function renderHeightForm() {
       if (!isNaN(val) && val > 0) {
         state.heights[vid] = { status: "measured", height_m: val };
         persistState();
+        updateStats();
         renderHeightForm();
       }
     });
@@ -2086,6 +2089,7 @@ document.getElementById("applyBulkHeight").addEventListener("click", () => {
     state.heights[v.id] = { status: "measured", height_m: val };
   }
   persistState();
+  updateStats();
   renderHeightForm();
   showToast(`全頂点に天井高 ${val}m を適用しました`);
 });
@@ -2248,7 +2252,7 @@ document.getElementById("confirmSource").addEventListener("click", () => {
     state.selectedSourceId = newSrc.id;
     showToast(`音源 ${name} を追加しました`);
   }
-  persistState(); closeSourceModal(); renderSourceList(); render();
+  persistState(); updateStats(); closeSourceModal(); renderSourceList(); render();
 });
 
 document.getElementById("cancelSource").addEventListener("click", closeSourceModal);
@@ -2355,7 +2359,7 @@ function renderSourceList() {
       pushHistory();
       state.sources = state.sources.filter(s => s.id !== src.id);
       if (state.selectedSourceId === src.id) state.selectedSourceId = null;
-      persistState(); renderSourceList(); render();
+      persistState(); updateStats(); renderSourceList(); render();
       showToast(`音源 ${src.name} を削除しました`);
     });
 
@@ -2498,6 +2502,57 @@ function checkDegenerateGeometry() {
   return { shortEdges, sharpAngles };
 }
 
+// 同一頂点対を結ぶ辺が複数存在するか（頂点削除の橋渡し等で発生しうる、
+// 次数2チェック・自己交差チェックのどちらもすり抜ける退化パターン）を検出。
+// 例: 長方形から2頂点を連続削除すると、残り2頂点間に「元の辺」と
+// 「橋渡しで新規追加された辺」の2本が生成され、両頂点とも次数2を保つため
+// 一筆書きチェックを通過してしまう。自己交差チェックも端点共有のため対象外。
+function checkDuplicateEdges() {
+  const seen = new Map(); // key: "頂点id1|頂点id2"(昇順) -> 最初に見つかった辺id
+  const violations = [];
+  for (const e of state.edges) {
+    const key = [e.from, e.to].slice().sort().join("|");
+    if (seen.has(key)) {
+      violations.push({ edgeA: seen.get(key), edgeB: e.id });
+    } else {
+      seen.set(key, e.id);
+    }
+  }
+  return violations;
+}
+
+// 辺で連結された頂点グループ（部屋ポリゴン候補）が3頂点未満なら、
+// 多角形として成立しない退化状態として検出する（上記の重複辺チェックと
+// 合わせて二重の安全網とする）。孤立頂点(#孤立頂点チェックで別途報告済み)は対象外。
+function checkMinimalPolygonSize() {
+  const adj = {};
+  for (const v of state.vertices) adj[v.id] = [];
+  for (const e of state.edges) {
+    if (adj[e.from]) adj[e.from].push(e.to);
+    if (adj[e.to]) adj[e.to].push(e.from);
+  }
+  const visited = new Set();
+  const violations = [];
+  for (const v of state.vertices) {
+    if (visited.has(v.id)) continue;
+    const comp = [];
+    const stack = [v.id];
+    visited.add(v.id);
+    while (stack.length) {
+      const cur = stack.pop();
+      comp.push(cur);
+      for (const nb of (adj[cur] || [])) {
+        if (!visited.has(nb)) { visited.add(nb); stack.push(nb); }
+      }
+    }
+    const hasAnyEdge = comp.some(vid => adj[vid] && adj[vid].length > 0);
+    if (hasAnyEdge && comp.length < 3) {
+      violations.push({ vertexIds: comp.slice() });
+    }
+  }
+  return violations;
+}
+
 // 現地データ生成前の統合検証。{blocking, warnings, info} を返す。
 // blocking が1件でもあれば生成をブロックする。
 function computeValidation() {
@@ -2535,6 +2590,18 @@ function computeValidation() {
     blocking.push({
       code: "self_intersection", target: it.edgeA,
       message: `辺 ${it.edgeA} と 辺 ${it.edgeB} が交差しています`,
+    });
+  }
+  for (const it of checkDuplicateEdges()) {
+    blocking.push({
+      code: "duplicate_edge", target: it.edgeA,
+      message: `辺 ${it.edgeA} と 辺 ${it.edgeB} が同じ頂点間を結んでおり重複しています`,
+    });
+  }
+  for (const it of checkMinimalPolygonSize()) {
+    blocking.push({
+      code: "degenerate_polygon", target: it.vertexIds[0],
+      message: `頂点 ${it.vertexIds.join(",")} が3頂点未満のグループを構成しており、多角形として成立しません`,
     });
   }
 
