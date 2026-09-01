@@ -1,4 +1,4 @@
-const CACHE_NAME = "survey-sketch-cache-v33"; // v33: 音源位置編集（ドラッグ・座標直接入力・ナッジ）でValidation再評価が呼ばれていなかった不具合を修正
+const CACHE_NAME = "survey-sketch-cache-v34"; // v34: meta.schema_versionを1.1へ（現地データにvalidationセクション追加を解析側が検知できるように）
 const SHARE_TARGET_CACHE = "survey-sketch-share-target-v1"; // 共有で受け取ったファイルの一時置き場
 const ASSETS = [
   "./index.html",

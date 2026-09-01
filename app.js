@@ -29,7 +29,7 @@ const state = {
   scalePxPerMeter: null,      // 描画時の概算スケール（合意事項③）
   firstStrokeDone: false,     // 初回ストロークが完了したか
   meta: {
-    schema_version: "1.0",
+    schema_version: "1.1",
     site_name: "",
     surveyor: "",
     survey_date: "",
@@ -3317,7 +3317,7 @@ function resetStateForNewSite() {
   state.selectedVertex = null;
   state.history = [];
   state.meta = {
-    schema_version: "1.0", site_name: "", surveyor: "", survey_date: "",
+    schema_version: "1.1", site_name: "", surveyor: "", survey_date: "",
     device: "Android tablet (PWA)", notes: "", rt60_s: null,
     siteId: genId(), phaseNo: 1, lastExternalSavedAt: null,
   };
