@@ -1,4 +1,4 @@
-const CACHE_NAME = "survey-sketch-cache-v32"; // v32: 音源のポリゴン内外判定を、未確定(辺長未測定)の部屋を含む場合でも安定するよう修正
+const CACHE_NAME = "survey-sketch-cache-v33"; // v33: 音源位置編集（ドラッグ・座標直接入力・ナッジ）でValidation再評価が呼ばれていなかった不具合を修正
 const SHARE_TARGET_CACHE = "survey-sketch-share-target-v1"; // 共有で受け取ったファイルの一時置き場
 const ASSETS = [
   "./index.html",

@@ -1809,7 +1809,7 @@ canvas.addEventListener("pointerup", (evt) => {
 
   // 音源ドラッグ終了
   if (_draggingSource) {
-    persistState(); renderSourceList(); render();
+    persistState(); updateStats(); renderSourceList(); render();
     _draggingSource = null;
     return;
   }
@@ -2324,7 +2324,7 @@ function renderSourceList() {
         // スケッチ座標も更新
         const sk = mToSketch(s.posX, s.posY);
         s.sketchX = sk.x; s.sketchY = sk.y;
-        persistState(); renderSourceList(); render();
+        persistState(); updateStats(); renderSourceList(); render();
       });
       inp.addEventListener("pointerdown", e => e.stopPropagation());
     });
@@ -2343,7 +2343,7 @@ function renderSourceList() {
         s.z = parseFloat((s.z + dz).toFixed(3));
         const sk = mToSketch(s.posX, s.posY);
         s.sketchX = sk.x; s.sketchY = sk.y;
-        persistState(); renderSourceList(); render();
+        persistState(); updateStats(); renderSourceList(); render();
       });
     });
 
@@ -2886,6 +2886,7 @@ document.getElementById("saveMetaBtn").addEventListener("click", () => {
   state.meta.rt60_s = rt60val !== "" ? parseFloat(rt60val) : null;
   state.meta.notes = document.getElementById("metaNotes").value;
   persistState();
+  updateStats();
   document.getElementById("appTitle").textContent = state.meta.site_name ? `🏗 ${state.meta.site_name}` : "🏗 現場実測スケッチ";
   document.getElementById("meta-modal").classList.remove("visible");
   showToast("現場情報を保存しました");
